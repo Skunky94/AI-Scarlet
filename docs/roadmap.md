@@ -2,17 +2,21 @@
 
 Questa roadmap traccia le fasi di sviluppo necessarie per prototipare e mettere in produzione l'agente Scarlet.
 
-## Fase 1: Ricerca e Design Architetturale (Completata)
+## Fase 0: Ricerca e Design Architetturale ✅
 - [x] Studio stato dell'arte (Motivazione Intrinseca, Frameworks).
 - [x] Selezione Letta come framework della memoria.
 - [x] Selezione modello PAD per motore emotivo vettoriale.
 - [x] Progettazione concettuale dell'Intelligent Heartbeat e divisione Cloud/Locale (RTX 4070 Ti).
 
-## Fase 1: Core Framework Letta (Settimane 1-2)
-- [ ] Inizializzazione repository (Python, Poetry, pre-commit hooks) e `scarlet_config.yaml`.
-- [ ] Implementazione di Letta con il solo LLM Cloud Primario (GPT-4o/Sonnet).
-- [ ] Stesura e test dei blocchi Core Memory: `Persona` (Aspirational Layer) e `World State`. 
-*Obiettivo: Validare la memoria a lungo termine senza le complessità ibride.*
+## Fase 1: Core Framework Letta (In Corso)
+- [x] Setup infrastruttura Docker (Letta v0.16.4 + Ollama GPU + PostgreSQL).
+- [x] Integrazione LLM Cloud: MiniMax M2.5 via OpenAI-compatible API.
+- [x] Stesura e test dei blocchi Core Memory: `Persona` e `World State`.
+- [x] Primo agente `scarlet-core` funzionante con risposta verificata.
+- [ ] Arricchimento memory blocks (Persona completa con Aspirational Layer).
+- [ ] Test multi-turn e persistenza memoria tra sessioni.
+- [ ] Setup `scarlet_config.yaml` per configurazione centralizzata.
+*Obiettivo: Validare la memoria a lungo termine e il ciclo agente-LLM.*
 
 ## Fase 2: Motore Emotivo e PAD (Settimane 3-4)
 - [ ] Sviluppo della classe `PadEngine` con vettori `[P, A, D]` e sistema di decadimento periodico (Omeostasi) verso `[0,0,0]`.
@@ -27,7 +31,7 @@ Questa roadmap traccia le fasi di sviluppo necessarie per prototipare e mettere 
 *Obiettivo: Validare il timing e i cicli di attivazione/disattivazione stampando inizialmente solo log di transizione.*
 
 ## Fase 4: Esecuzione Ibrida ("Il Cervello") (Settimane 7-8)
-- [ ] Setup del server LLM Locale (Ollama + Llama3-8b-Instruct) ottimizzato per 16GB VRAM (su RTX 4070 Ti).
+- [ ] Setup del LLM Locale via Ollama (es. Llama3.1-8b-instruct) sulla RTX 4070 Ti.
 - [ ] Sviluppo della logica per demandare task di Sentiment Analysis PAD all'LLM locale.
 - [ ] Integrazione del Local LLM per generare riflessioni di background e monologhi per il Buffer Subconscio.
 *Obiettivo: Portare online la 4070 Ti e smistare traffico a basso valore.*

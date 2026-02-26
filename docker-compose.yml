@@ -1,0 +1,64 @@
+# === Progetto Scarlet — Docker Compose ===
+# Letta Server + Ollama con GPU CUDA
+#
+# Uso: docker compose up -d
+# Richiede: .env nella stessa directory
+
+services:
+  # --- Ollama: LLM Locale con GPU ---
+  ollama:
+    image: ollama/ollama:latest
+    container_name: scarlet-ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+  # --- Letta Server: Agente Scarlet ---
+  letta:
+    image: letta/letta:latest
+    container_name: scarlet-letta
+    depends_on:
+      - ollama
+    volumes:
+      - letta_pgdata:/var/lib/postgresql/data
+    ports:
+      - "8283:8283"
+    environment:
+      # MiniMax come provider OpenAI (stile Cursor: override base URL)
+      - OPENAI_API_KEY=${MINIMAX_API_KEY}
+      - OPENAI_BASE_URL=https://api.minimax.io/v1
+      # Ollama locale (raggiungibile via nome servizio)
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      # Sicurezza
+      - SECURE=true
+      - LETTA_SERVER_PASSWORD=${LETTA_SERVER_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8283/v1/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ollama_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: H:/AI-Scarlet/.ollama
+  letta_pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: H:/AI-Scarlet/.letta/pgdata

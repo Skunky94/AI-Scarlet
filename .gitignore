@@ -1,0 +1,33 @@
+# === Progetto Scarlet — Git Ignore ===
+
+# Variabili d'ambiente (API keys)
+.env
+.env.local
+.env.*.local
+
+# Dati persistenti Docker
+.letta/
+.ollama/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
