@@ -89,6 +89,8 @@ services:
       - ./.agent_id:/app/.agent_id:ro
       # Cache modelli HuggingFace (DistilBERT): evita re-download a ogni riavvio
       - gateway_hf_cache:/app/.cache/huggingface
+      # Log osservabilita': persistiti sull'host, accessibili fuori dal container
+      - ./logs:/app/logs
     ports:
       - "8000:8000"
     environment:

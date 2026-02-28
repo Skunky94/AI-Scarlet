@@ -1,0 +1,15 @@
+{
+  "_comment": "Osservabilita' Scarlet. Modifica 'debug' per attivare/disattivare il tracciamento completo.",
+  "debug": true,
+  "log_dir": "logs",
+  "window_minutes": 15,
+  "stdout": true,
+  "components": {
+    "_comment": "true = usa livello globale (DEBUG se debug=true, INFO se debug=false). false = silenzia il componente. {'debug': true} = forza DEBUG solo per questo componente.",
+    "gateway": true,
+    "pad": true,
+    "memory": true,
+    "letta": true,
+    "ollama": true
+  }
+}

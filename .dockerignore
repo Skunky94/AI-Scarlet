@@ -26,6 +26,8 @@ scripts/
 *.md
 docs/
 config/
+# Eccezione: la config di osservabilita' deve essere inclusa nell'immagine
+!config/observability.json
 .env
 .env.*
 

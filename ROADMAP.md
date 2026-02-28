@@ -108,6 +108,19 @@ o decidi di iniziarne una nuova. Usa `scripts/commit.ps1` con tipo `docs(roadmap
 - 📋 Aggiungere test per `MemoryAgent` e `MemoryRetriever` con mock Letta/Ollama
 - 🔍 Valutare se introdurre `pytest` come runner ufficiale (oggi gli script sono standalone)
 
+### Osservabilità & Monitoraggio ✅
+- ✅ `scarlet_observability/` — modulo centralizzato (`logger.py`, `__init__.py`)
+  - `TimeWindowedFileHandler` — file rotanti per finestre temporali (default 15 min), nominati `YYYY-MM-DD_HH-MM.log`
+  - `ScarletFormatter` — formato leggibile `[timestamp] [LEVEL] [component] message | key=val`
+  - Singleton `ScarletObservability` con gerarchia logger: `scarlet.gateway`, `scarlet.pad`, `scarlet.memory`, `scarlet.letta`, `scarlet.ollama`
+- ✅ `config/observability.json` — configurazione runtime: debug on/off, toggle per-componente, window_minutes
+- ✅ Volume `./logs:/app/logs` — log accessibili dall'host senza entrare nel container
+- ✅ Strumentazione completa di tutti i moduli:
+  - `scarlet_gateway/main.py`, `routes/openai.py`, `routes/letta.py`, `routes/pad.py`
+  - `scarlet_pad/subconscious.py`, `core.py`, `modulator.py`, `letta_sync.py`
+  - `scarlet_memory/agent.py`, `retriever.py`
+- ✅ Pattern dual-logger: logger logica + logger API HTTP (letta/ollama) indipendentemente configurabili
+
 ### Robustezza Gateway
 - 📋 Retry automatico su errori transitori Letta (timeout, 503)
 - 📋 Timeout esplicito su tutte le chiamate HTTP a Letta/Ollama (oggi alcune hanno `timeout=None`)
@@ -185,8 +198,7 @@ o decidi di iniziarne una nuova. Usa `scripts/commit.ps1` con tipo `docs(roadmap
 
 | Data | Focus | Risultato |
 |------|-------|-----------|
-| 2026-02-28 | Infrastruttura Docker + Workflow DevOps | Fase 2 completata — `docker compose up -d` avvia tutto; commit helper attivo |
-
+| 2026-02-28 | Infrastruttura Docker + Workflow DevOps | Fase 2 completata — `docker compose up -d` avvia tutto; commit helper attivo || 2026-02-28 | Osservabilità (Fase 3) | `scarlet_observability/` creato; 10 moduli strumentati; log con rotazione temporale |
 ---
 
 ## Riferimenti

@@ -8,18 +8,15 @@ Lifecycle:
 """
 
 import os
-import logging
+import time
 import requests
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Configura logging strutturato
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-)
-logger = logging.getLogger("scarlet.gateway")
+# Sistema di osservabilita' centralizzato — inizializzato al primo import
+from scarlet_observability import get_logger
+log = get_logger("gateway.main")
 
 
 @asynccontextmanager
@@ -30,16 +27,19 @@ async def lifespan(app: FastAPI):
     Shutdown: segnala la fine prima che uvicorn dreni le connessioni.
     """
     # === STARTUP ===
-    letta_url  = os.getenv("LETTA_URL",    "http://localhost:8283")
-    letta_key  = os.getenv("LETTA_API_KEY", "scarlet_dev")
-    ollama_url = os.getenv("OLLAMA_URL",   "http://localhost:11434")
+    letta_url  = os.getenv("LETTA_URL",     "http://localhost:8283")
+    letta_key  = os.getenv("LETTA_API_KEY",  "scarlet_dev")
+    ollama_url = os.getenv("OLLAMA_URL",    "http://localhost:11434")
+    agent_id   = os.getenv("AGENT_ID", "")
 
-    logger.info("Avvio Scarlet Gateway...")
-    logger.info(f"  LETTA_URL  = {letta_url}")
-    logger.info(f"  OLLAMA_URL = {ollama_url}")
-    logger.info(f"  AGENT_ID   = {os.getenv('AGENT_ID', '(da file .agent_id)')}")
+    log.info("======== Scarlet Gateway STARTUP ========")
+    log.info(f"LETTA_URL={letta_url}")
+    log.info(f"OLLAMA_URL={ollama_url}")
+    log.info(f"AGENT_ID={(agent_id if agent_id else '(da file .agent_id)')}")
+    log.debug(f"LETTA_API_KEY={'***' if letta_key else '(vuota)'}")
 
     # Verifica connessione Letta (non bloccante: solo warning se non disponibile)
+    t0 = time.time()
     try:
         r = requests.get(
             f"{letta_url}/v1/health",
@@ -47,27 +47,33 @@ async def lifespan(app: FastAPI):
             timeout=5,
         )
         r.raise_for_status()
-        logger.info("Letta: OK")
+        elapsed_ms = (time.time() - t0) * 1000
+        log.info(f"Letta health OK | status={r.status_code} elapsed_ms={elapsed_ms:.0f}")
+        log.debug(f"Letta health body: {r.text[:200]}")
     except Exception as exc:
-        logger.warning(f"Letta non raggiungibile all'avvio: {exc}")
+        elapsed_ms = (time.time() - t0) * 1000
+        log.warning(f"Letta non raggiungibile al boot | url={letta_url} elapsed_ms={elapsed_ms:.0f} error={exc}")
 
-    # Verifica Ollama
+    # Verifica Ollama e lista modelli disponibili
+    t0 = time.time()
     try:
         r = requests.get(f"{ollama_url}/api/tags", timeout=5)
+        elapsed_ms = (time.time() - t0) * 1000
         models = [m["name"] for m in r.json().get("models", [])]
-        logger.info(f"Ollama: OK — modelli: {models}")
+        log.info(f"Ollama health OK | models={models} elapsed_ms={elapsed_ms:.0f}")
     except Exception as exc:
-        logger.warning(f"Ollama non raggiungibile all'avvio: {exc}")
+        elapsed_ms = (time.time() - t0) * 1000
+        log.warning(f"Ollama non raggiungibile al boot | url={ollama_url} elapsed_ms={elapsed_ms:.0f} error={exc}")
 
-    # I router (pad, letta, openai) sono già stati importati — SubconsciousEvaluator
-    # (DistilBERT) si sta caricando in background tramite il thread warmup di pad.py.
-    logger.info("Scarlet Gateway pronto — in ascolto sulla porta 8000.")
+    # I router sono importati sotto — SubconsciousEvaluator (DistilBERT) si carica
+    # in background tramite il thread warmup di pad.py (impegna GPU ~30s al primo avvio).
+    log.info("======== Scarlet Gateway PRONTO ========")
 
     yield  # L'app gira qui
 
     # === SHUTDOWN ===
-    logger.info("Scarlet Gateway: shutdown ordinato avviato.")
-    logger.info("Shutdown completato.")
+    # uvicorn drena le richieste in corso su SIGTERM (--timeout-graceful-shutdown)
+    log.info("======== Scarlet Gateway SHUTDOWN ========")
 
 
 # Importazione router DOPO la definizione del lifespan

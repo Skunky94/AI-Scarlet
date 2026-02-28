@@ -33,9 +33,12 @@ COPY requirements.txt .
 RUN grep -v "^torch" requirements.txt | pip install --no-cache-dir -r /dev/stdin
 
 # --- Copia sorgente ---
-COPY scarlet_gateway/ ./scarlet_gateway/
-COPY scarlet_pad/     ./scarlet_pad/
-COPY scarlet_memory/  ./scarlet_memory/
+COPY scarlet_gateway/       ./scarlet_gateway/
+COPY scarlet_pad/           ./scarlet_pad/
+COPY scarlet_memory/        ./scarlet_memory/
+COPY scarlet_observability/ ./scarlet_observability/
+# Config osservabilita' (unico file di config necessario nell'immagine)
+COPY config/observability.json ./config/observability.json
 
 # --- Variabili d'ambiente con default per Docker (sovrascrivibili in compose) ---
 # URL servizi (nome container Docker → risolto dalla rete interna)

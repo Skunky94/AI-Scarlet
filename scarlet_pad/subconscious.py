@@ -15,6 +15,9 @@ import time
 from typing import Tuple
 from dataclasses import dataclass
 from enum import Enum
+from scarlet_observability import get_logger
+
+log = get_logger("pad.subconscious")
 
 
 # ============================================================
@@ -43,41 +46,50 @@ class TransformerSentiment:
     def __init__(self):
         import torch
         from transformers import pipeline
-        
+
         self.device = 0 if torch.cuda.is_available() else -1
         device_name = torch.cuda.get_device_name(0) if self.device == 0 else "CPU"
-        
-        print(f"[Subconscious] Caricamento modello sentiment su {device_name}...")
+
+        log.info(f"Caricamento modello sentiment | device={device_name} cuda={self.device >= 0}")
         t0 = time.time()
-        
+
         self.analyzer = pipeline(
             "text-classification",
             model="tabularisai/multilingual-sentiment-analysis",
             device=self.device,
             top_k=None
         )
-        
+
         # Warmup: prima inferenza per pre-compilare CUDA kernels
         _ = self.analyzer("warmup")
-        
         load_time = time.time() - t0
-        print(f"[Subconscious] Modello sentiment pronto ({load_time:.1f}s, {device_name})")
+        log.info(f"Modello sentiment pronto | load_time_s={load_time:.1f} device={device_name} warmup=OK")
     
     def analyze(self, text: str) -> Sentiment:
         """Analizza il sentiment del testo. ~4ms su GPU warm."""
+        log.debug(f"Transformer analyze | input_len={len(text)} preview={text[:80]!r}")
+        t0 = time.time()
         result = self.analyzer(text)
-        
-        # result[0] è una lista di dicts con 'label' e 'score'
+        elapsed_ms = (time.time() - t0) * 1000
+
+        # result[0] e' una lista di dicts con 'label' e 'score'
+        all_scores = {r['label']: round(r['score'], 4) for r in result[0]}
         top = max(result[0], key=lambda x: x['score'])
         label = top['label']
         confidence = top['score']
-        
+
         base_polarity, base_intensity = _LABEL_MAP.get(label, (0.0, 0.1))
-        
+
         # Scala per confidence del modello
         polarity = base_polarity * confidence
         intensity = base_intensity * confidence
-        
+
+        log.debug(f"Transformer scores | all={all_scores}")
+        log.info(
+            f"Sentiment | label={label!r} confidence={confidence:.4f}"
+            f" polarity={polarity:+.3f} intensity={intensity:.3f} elapsed_ms={elapsed_ms:.1f}"
+        )
+
         return Sentiment(polarity=polarity, intensity=intensity, label=label)
 
 
@@ -139,25 +151,32 @@ _DOMANDA_INDICATORS = [
 def classify_intent(text: str) -> Intent:
     """Classifica l'intent del messaggio."""
     lower = text.lower().strip()
-    
+
     for p in _INSULTO_PATTERNS:
         if re.search(p, lower):
+            log.debug(f"Intent match | pattern=insulto text_preview={lower[:60]!r}")
             return Intent.INSULTO
     for p in _COMPLIMENTO_PATTERNS:
         if re.search(p, lower):
+            log.debug(f"Intent match | pattern=complimento text_preview={lower[:60]!r}")
             return Intent.COMPLIMENTO
     for p in _ORDINE_PATTERNS:
         if re.search(p, lower):
+            log.debug(f"Intent match | pattern=ordine text_preview={lower[:60]!r}")
             return Intent.ORDINE
     if sum(1 for p in _STIMOLO_PATTERNS if re.search(p, lower)) >= 1:
+        log.debug(f"Intent match | pattern=stimolo_intellettuale text_preview={lower[:60]!r}")
         return Intent.STIMOLO_INTELLETTUALE
     for p in _DOMANDA_INDICATORS:
         if re.search(p, lower):
+            log.debug(f"Intent match | pattern=domanda text_preview={lower[:60]!r}")
             return Intent.DOMANDA
     for p in _SALUTO_PATTERNS:
         if re.search(p, lower):
+            log.debug(f"Intent match | pattern=saluto text_preview={lower[:60]!r}")
             return Intent.SALUTO
-    
+
+    log.debug(f"Intent fallback | intent=affermazione text_preview={lower[:60]!r}")
     return Intent.AFFERMAZIONE
 
 
@@ -178,29 +197,34 @@ _PERSONALITY_MATRIX = {
 
 
 def compute_pad_deltas(intent: Intent, sentiment: Sentiment) -> Tuple[float, float, float]:
-    """Calcola i delta PAD combinando intent, sentiment e personalità."""
+    """Calcola i delta PAD combinando intent, sentiment e personalita'."""
     base_dP, base_dA, base_dD = _PERSONALITY_MATRIX[intent]
-    
-    # Scala per intensità sentiment
+
+    # Scala per intensita' sentiment
     scale = 0.3 + sentiment.intensity * 0.7
-    
+
     dP = base_dP * scale
     dA = base_dA * scale
     dD = base_dD * scale
-    
+
+    log.debug(
+        f"PAD matrix | intent={intent.value} base=({base_dP:+.2f},{base_dA:+.2f},{base_dD:+.2f})"
+        f" sentiment={sentiment.label} intensity={sentiment.intensity:.3f} scale={scale:.3f}"
+    )
+
     # Per AFFERMAZIONE, modula dP con la polarity del sentiment
     if intent == Intent.AFFERMAZIONE:
         dP = sentiment.polarity * 0.15 * scale
-    
     # Per DOMANDA, sentiment positivo aumenta dP
     if intent == Intent.DOMANDA and sentiment.polarity > 0:
         dP += sentiment.polarity * 0.1 * scale
-    
+
     # Clamp
     dP = max(-1.0, min(1.0, dP))
     dA = max(-1.0, min(1.0, dA))
     dD = max(-1.0, min(1.0, dD))
-    
+
+    log.debug(f"PAD deltas finali | dP={dP:+.3f} dA={dA:+.3f} dD={dD:+.3f}")
     return dP, dA, dD
 
 
@@ -223,16 +247,25 @@ class SubconsciousEvaluator:
         Valuta l'input utente e ritorna (dP, dA, dD, reason).
         ~5ms su GPU warm.
         """
+        log.debug(f"evaluate_input | input_len={len(user_input)} preview={user_input[:80]!r}")
+        t0 = time.time()
+
         # 1. Sentiment via transformer
         sentiment = self.sentiment_model.analyze(user_input)
-        
+
         # 2. Intent via pattern rules
         intent = classify_intent(user_input)
-        
+        log.info(f"Intent classified | intent={intent.value}")
+
         # 3. Delta PAD via personality matrix
         dP, dA, dD = compute_pad_deltas(intent, sentiment)
-        
+
         # 4. Reason leggibile
         reason = f"{intent.value} | {sentiment.label} ({sentiment.polarity:+.2f})"
-        
+
+        elapsed_ms = (time.time() - t0) * 1000
+        log.info(
+            f"evaluate_input OK | dP={dP:+.3f} dA={dA:+.3f} dD={dD:+.3f}"
+            f" reason={reason!r} elapsed_ms={elapsed_ms:.1f}"
+        )
         return dP, dA, dD, reason

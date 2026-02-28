@@ -44,8 +44,13 @@ Dominance → Frequency Penalty:
 """
 
 import os
+import time
 import requests
 from typing import Optional
+from scarlet_observability import get_logger
+
+log     = get_logger("pad.modulator")
+log_api = get_logger("letta")
 
 
 class PADModulator:
@@ -82,32 +87,32 @@ class PADModulator:
     def compute_params(self, p: float, a: float, d: float) -> dict:
         """
         Calcola i parametri LLM dallo stato PAD.
-        
-        Args:
-            p: Pleasure [-1, +1]
-            a: Arousal [-1, +1]  
-            d: Dominance [-1, +1]
-        
+
         Returns dict con:
-            temperature: [0.3, 1.0] — da Arousal
-            max_tokens: [1000, 8000] — da Pleasure
-            frequency_penalty: [0.0, 0.8] — da Dominance (invertita)
+            temperature: [0.3, 1.0] -- da Arousal
+            max_tokens: [1000, 8000] -- da Pleasure
+            frequency_penalty: [0.0, 0.8] -- da Dominance (invertita)
         """
         temperature = round(self._map_value(a, self.temp_range), 2)
         max_tokens = int(self._map_value(p, self.tokens_range))
         frequency_penalty = round(self._map_value(-d, self.freq_pen_range), 2)
-        # Nota: -d perché alta Dominance = bassa frequency_penalty (assertiva, ripete)
-        
+
         # Safety clamp per rispettare limiti MiniMax M2.5
         temperature = max(0.01, min(1.0, temperature))
         max_tokens = max(500, min(16000, max_tokens))
         frequency_penalty = max(0.0, min(2.0, frequency_penalty))
-        
-        return {
+
+        params = {
             "temperature": temperature,
             "max_tokens": max_tokens,
             "frequency_penalty": frequency_penalty
         }
+        log.debug(
+            f"compute_params | P={p:+.3f}->max_tokens={max_tokens}"
+            f" A={a:+.3f}->temp={temperature}"
+            f" D={d:+.3f}->freq_pen={frequency_penalty}"
+        )
+        return params
     
     def apply_to_agent(self, agent_id: str, p: float, a: float, d: float) -> Optional[dict]:
         """
@@ -115,25 +120,29 @@ class PADModulator:
         Legge la config corrente, modifica solo i 3 campi, PATCH completo.
         """
         params = self.compute_params(p, a, d)
-        
+        log.debug(f"apply_to_agent | agent_id={agent_id[:20]}... params={params}")
+
         try:
             # 1. Leggi config corrente (Letta richiede tutti i campi nel PATCH)
+            t0 = time.time()
+            log_api.debug(f"GET agent config | agent_id={agent_id[:20]}...")
             r_get = requests.get(
                 f"{self.letta_url}/v1/agents/{agent_id}",
                 headers=self.headers,
                 timeout=5
             )
             if r_get.status_code != 200:
-                print(f"[PADModulator] WARN: GET agent fallito ({r_get.status_code})")
+                log.warning(f"apply_to_agent GET fallito | status={r_get.status_code} body={r_get.text[:200]!r}")
                 return None
-            
+
             current_config = r_get.json().get("llm_config", {})
-            
+            log_api.debug(f"Letta llm_config corrente | model={current_config.get('model','?')} temp={current_config.get('temperature','?')}")
+
             # 2. Merge: aggiorna solo i 3 campi dinamici
             current_config["temperature"] = params["temperature"]
             current_config["max_tokens"] = params["max_tokens"]
             current_config["frequency_penalty"] = params["frequency_penalty"]
-            
+
             # 3. PATCH con config completo
             r_patch = requests.patch(
                 f"{self.letta_url}/v1/agents/{agent_id}",
@@ -141,13 +150,22 @@ class PADModulator:
                 json={"llm_config": current_config},
                 timeout=5
             )
-            
+            elapsed_ms = (time.time() - t0) * 1000
+
             if r_patch.status_code == 200:
+                log.info(
+                    f"apply_to_agent OK | temp={params['temperature']}"
+                    f" max_tokens={params['max_tokens']} freq_pen={params['frequency_penalty']}"
+                    f" elapsed_ms={elapsed_ms:.0f}"
+                )
                 return params
             else:
-                print(f"[PADModulator] WARN: PATCH fallito ({r_patch.status_code}): {r_patch.text[:200]}")
+                log.warning(
+                    f"apply_to_agent PATCH fallito | status={r_patch.status_code}"
+                    f" body={r_patch.text[:200]!r} elapsed_ms={elapsed_ms:.0f}"
+                )
                 return None
-                
+
         except Exception as e:
-            print(f"[PADModulator] WARN: Errore: {e}")
+            log.error(f"apply_to_agent errore | error={e}")
             return None

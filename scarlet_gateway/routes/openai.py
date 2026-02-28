@@ -4,6 +4,7 @@ import requests
 import json
 import asyncio
 import threading
+import traceback
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -14,9 +15,11 @@ from scarlet_gateway.routes.letta import chat_letta, ChatRequest, stream_letta_s
 from scarlet_pad.modulator import PADModulator
 from scarlet_memory.agent import MemoryAgent
 from scarlet_memory.retriever import MemoryRetriever
+from scarlet_observability import get_logger
 import re
 
 router = APIRouter()
+log = get_logger("gateway.openai")
 
 # Singletons
 _pad_modulator = PADModulator()
@@ -58,24 +61,26 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     Endpoint proxy compatibile con lo standard OpenAI (usato da UI come Open WebUI).
     Implementa il pattern composito: PAD Evaluate -> PAD Update -> Letta Chat.
     """
-    # DEBUG: Log dell'intera richiesta per capire i duplicati
-    with open("openai_requests.log", "a", encoding="utf-8") as f:
-        f.write(f"\n--- NUOVA RICHIESTA [{int(time.time())}] ---\n")
-        f.write(req.model_dump_json(indent=2) + "\n")
-
     if not req.messages:
         raise HTTPException(status_code=400, detail="Nessun messaggio fornito")
 
+    # Log strutturato della richiesta in ingresso
+    log.info(
+        f"Richiesta | model={req.model} n_messages={len(req.messages)}"
+        f" stream={req.stream} temp={req.temperature}"
+    )
+    log.debug(f"Payload completo richiesta: {req.model_dump_json()}")
+
     # Estraggo solo l'ultimo messaggio dell'utente.
-    # Open WebUI inviera *tutta* la storia della chat, ma Letta ha gia la sua core memory.
-    # Inviare l'intera storia duplicherebbe i messaggi all'infinito dentro Letta.
+    # Open WebUI invia *tutta* la storia, ma Letta ha gia' la sua core memory.
+    # Inviare la storia duplicherebbe i messaggi all'infinito dentro Letta.
     last_user_msg = next((m for m in reversed(req.messages) if m.role == "user"), None)
-    
+
     if not last_user_msg:
         raise HTTPException(status_code=400, detail="Nessun messaggio utente trovato")
-    
+
     user_text = last_user_msg.content
-    print(f"\n[Gateway-OpenAI] Ricevuto input (len {len(user_text)}): {user_text[:100]}...")
+    log.info(f"User input | len={len(user_text)} preview={user_text[:120]!r}")
 
     # --- INTERCETTAZIONE META-PROMPT (Open WebUI) ---
     # Evitiamo di inquinare la memoria di Scarlet passandole i prompt automatici della UI.
@@ -96,8 +101,18 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     )
     
     if is_meta_prompt:
-        print("[Gateway-OpenAI] 🛑 Intercettata richiesta background UI (Meta-Prompt). Ignoro l'engine interno e Letta.")
-        
+        # Pattern che ha triggerato l'intercettazione (per debug)
+        patterns_hit = [
+            ("is_system_task",             is_system_task),
+            ("### task:",                  "### task:" in text_lower),
+            ("<chat_history>",             "<chat_history>" in text_lower),
+            ("query: prefix",              user_text.startswith("query:")),
+            ("json format:",               'json format:' in text_lower),
+        ]
+        triggered = [p for p, v in patterns_hit if v]
+        log.info(f"Meta-prompt intercettato | pattern={triggered} user_preview={user_text[:80]!r}")
+        log.debug(f"Meta-prompt system_msgs: {system_msgs[:2]}")
+
         # Determina il tipo di risposta JSON attesa da Open WebUI analizzando le keyword
         mock_content = "{}"
         if '"title"' in text_lower:
@@ -108,7 +123,8 @@ async def openai_chat_completions(req: ChatCompletionRequest):
             mock_content = '{"follow_ups": []}'
         else:
             mock_content = '{"info": "meta-prompt ignored"}'
-            
+
+        log.debug(f"Mock response: {mock_content}")
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -120,42 +136,59 @@ async def openai_chat_completions(req: ChatCompletionRequest):
 
     # STEP 0.5: Memory Retrieval (pre-turno)
     try:
-        print("[Gateway-OpenAI] 0.5. Recupero memorie rilevanti...")
+        log.debug(f"Step 0.5 Memory Retrieval | query_preview={user_text[:60]!r}")
+        t_mem = time.time()
         mem_feed = _memory_retriever.feed_context(user_text)
-        if mem_feed["memories_found"] > 0:
-            print(f"   -> {mem_feed['memories_found']} memorie richiamate in {mem_feed['elapsed_ms']:.0f}ms")
+        elapsed_mem = (time.time() - t_mem) * 1000
+        log.info(
+            f"Step 0.5 Memory Retrieval OK | memories_found={mem_feed['memories_found']}"
+            f" block_updated={mem_feed.get('block_updated')} elapsed_ms={elapsed_mem:.0f}"
+        )
     except Exception as e:
-        print(f"[Gateway-OpenAI] WARN: Memory retrieval fallito: {e}")
+        log.warning(f"Step 0.5 Memory Retrieval FALLITO | error={e}")
 
     try:
         # STEP 1: Valutazione Subconscia (Transformer GPU)
-        print("[Gateway-OpenAI] 1. Valutazione PAD subconscia...")
+        log.debug(f"Step 1 PAD Evaluate | input_len={len(user_text)}")
+        t_eval = time.time()
         eval_resp = await evaluate_pad(EvaluateRequest(text=user_text))
-        print(f"   -> {eval_resp}")
-        
+        elapsed_eval = (time.time() - t_eval) * 1000
+        log.info(f"Step 1 PAD Evaluate OK | dP={eval_resp.dP:+.3f} dA={eval_resp.dA:+.3f} dD={eval_resp.dD:+.3f} reason={eval_resp.reason!r} elapsed_ms={elapsed_eval:.1f}")
+
         # STEP 2: Aggiornamento Letta SSOT
-        print("[Gateway-OpenAI] 2. Scrittura memoria Letta...")
+        log.debug(f"Step 2 PAD Update | dP={eval_resp.dP:+.3f} dA={eval_resp.dA:+.3f} dD={eval_resp.dD:+.3f}")
+        t_upd = time.time()
         upd_resp = await update_pad(UpdateRequest(
-            dP=eval_resp.dP, 
-            dA=eval_resp.dA, 
-            dD=eval_resp.dD, 
+            dP=eval_resp.dP,
+            dA=eval_resp.dA,
+            dD=eval_resp.dD,
             event_reason=eval_resp.reason
         ))
-        print(f"   -> Nuovo Mood: {upd_resp.new_mood}")
+        elapsed_upd = (time.time() - t_upd) * 1000
+        log.info(f"Step 2 PAD Update OK | P={upd_resp.p:+.3f} A={upd_resp.a:+.3f} D={upd_resp.d:+.3f} mood={upd_resp.new_mood!r} elapsed_ms={elapsed_upd:.1f}")
 
         # STEP 2.5: Modulazione parametri LLM basata su PAD
-        print("[Gateway-OpenAI] 2.5. Modulazione parametri LLM da PAD...")
-        agent_id = open(".agent_id").read().strip()
+        log.debug(f"Step 2.5 LLM Modulation | P={upd_resp.p:+.3f} A={upd_resp.a:+.3f} D={upd_resp.d:+.3f}")
+        t_mod = time.time()
+        try:
+            agent_id = open(".agent_id").read().strip()
+        except Exception:
+            agent_id = ""
         mod_params = _pad_modulator.apply_to_agent(
             agent_id, p=upd_resp.p, a=upd_resp.a, d=upd_resp.d
         )
+        elapsed_mod = (time.time() - t_mod) * 1000
         if mod_params:
-            print(f"   -> temp={mod_params['temperature']}, max_tok={mod_params['max_tokens']}, freq_pen={mod_params['frequency_penalty']}")
+            log.info(
+                f"Step 2.5 LLM Modulation OK | temp={mod_params['temperature']}"
+                f" max_tokens={mod_params['max_tokens']} freq_pen={mod_params['frequency_penalty']}"
+                f" elapsed_ms={elapsed_mod:.1f}"
+            )
         else:
-            print("   -> [WARN] Modulazione fallita, parametri invariati")
+            log.warning(f"Step 2.5 LLM Modulation FALLITA | parametri invariati elapsed_ms={elapsed_mod:.1f}")
 
     except Exception as e:
-        print(f"[Gateway-OpenAI] Errore critico nel flusso subconscio: {e}")
+        log.error(f"Errore critico flusso subconscio | error={e} traceback={traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
     # Costruisco ID e timestamp per la risposta OpenAI
@@ -166,31 +199,36 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     # STREAMING: Proxy reale SSE da Letta -> OpenAI format -> UI
     # ==========================================================
     if req.stream:
-        print("[Gateway-OpenAI] 3. STREAM: Inoltro messaggio a Letta via SSE...")
-        
+        log.debug(f"Step 3 STREAM | avvio SSE proxy verso Letta | user_len={len(user_text)}")
+        _stream_start = time.time()
+
         async def event_generator():
-            full_response = []  # Accumula la risposta per il Memory Agent
-            full_think = []     # Accumula i pensieri
-            
+            full_response = []   # Accumula la risposta per il Memory Agent
+            chunk_count = 0
+            first_chunk_ms: float = 0.0
+
             for chunk_obj in stream_letta_sse(user_text):
-                # Fine dello stream
                 if chunk_obj.get("type") == "done":
                     break
-                
+
                 msg_type = chunk_obj.get("message_type", "")
-                
-                # Processiamo solo gli assistant_message (il testo visibile + think)
+                log.debug(f"SSE event | type={msg_type} keys={list(chunk_obj.keys())}")
+
+                # Processiamo solo gli assistant_message (testo visibile + think)
                 if msg_type != "assistant_message":
                     continue
-                
+
                 content = chunk_obj.get("content", "")
                 if not content:
                     continue
-                
-                # Traccia risposta e pensiero per il Memory Agent
+
                 full_response.append(content)
-                
-                # Passiamo tutto il contenuto (incluso <think>) direttamente alla UI
+                chunk_count += 1
+
+                if chunk_count == 1:
+                    first_chunk_ms = (time.time() - _stream_start) * 1000
+                    log.debug(f"Primo chunk SSE | first_chunk_ms={first_chunk_ms:.0f} preview={content[:40]!r}")
+
                 chunk_data = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
@@ -199,7 +237,7 @@ async def openai_chat_completions(req: ChatCompletionRequest):
                     "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]
                 }
                 yield f"data: {json.dumps(chunk_data)}\n\n"
-            
+
             # Pacchetto finale: stop
             final_data = {
                 "id": response_id,
@@ -210,34 +248,49 @@ async def openai_chat_completions(req: ChatCompletionRequest):
             }
             yield f"data: {json.dumps(final_data)}\n\n"
             yield "data: [DONE]\n\n"
-            
-            # STEP 4: Memory Save (background, dopo risposta)
+
+            total_elapsed_ms = (time.time() - _stream_start) * 1000
             combined = "".join(full_response)
-            # Separa think e response
+            log.info(
+                f"Step 3 STREAM completato | chunks={chunk_count}"
+                f" response_len={len(combined)} first_chunk_ms={first_chunk_ms:.0f}"
+                f" total_elapsed_ms={total_elapsed_ms:.0f}"
+            )
+
+            # STEP 4: Memory Save (background, dopo che la risposta e' stata inviata)
             import re as _re
             think_match = _re.findall(r'<think>(.*?)</think>', combined, _re.DOTALL)
             think_text = "\n".join(think_match) if think_match else ""
             visible_text = _re.sub(r'<think>.*?</think>', '', combined, flags=_re.DOTALL).strip()
-            
+
             if visible_text:
-                print("[Gateway-OpenAI] 4. BACKGROUND: Salvataggio memorie...")
+                log.info(
+                    f"Step 4 BACKGROUND Memory Save | user_len={len(user_text)}"
+                    f" response_len={len(visible_text)} think_len={len(think_text)}"
+                )
                 threading.Thread(
                     target=_memory_agent.process_turn,
                     args=(user_text, think_text, visible_text),
                     daemon=True
                 ).start()
-        
+            else:
+                log.debug("Step 4 BACKGROUND Memory Save | visible_text vuota, skip")
+
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # ==========================================================
     # NON-STREAMING: Risposta completa in blocco unico
     # ==========================================================
-    print("[Gateway-OpenAI] 3. Inoltro messaggio cosciente a Scarlett (non-stream)...")
+    log.debug(f"Step 3 NON-STREAM | inoltro a Letta user_len={len(user_text)}")
+    t_chat = time.time()
     try:
         chat_resp = await chat_letta(ChatRequest(message=user_text, stream=False))
-        print(f"   -> Scarlett ha risposto in {len(chat_resp.response)} caratteri")
+        elapsed_chat = (time.time() - t_chat) * 1000
+        log.info(f"Step 3 Letta risposta | response_len={len(chat_resp.response)} elapsed_ms={elapsed_chat:.0f}")
+        log.debug(f"Risposta Letta (preview): {chat_resp.response[:200]!r}")
     except Exception as e:
-        print(f"[Gateway-OpenAI] Errore critico nella chiamata Letta: {e}")
+        elapsed_chat = (time.time() - t_chat) * 1000
+        log.error(f"Errore chiamata Letta non-stream | elapsed_ms={elapsed_chat:.0f} error={e} traceback={traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
     openai_response = {

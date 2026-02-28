@@ -7,6 +7,9 @@ un decadimento morbido verso la baseline di Scarlet.
 
 from dataclasses import dataclass
 from typing import Tuple
+from scarlet_observability import get_logger
+
+log = get_logger("pad.core")
 
 @dataclass
 class PADState:
@@ -32,13 +35,22 @@ class PADCore:
     def apply_stimulus(self, current: PADState, dp: float, da: float, dd: float) -> PADState:
         """
         Applica uno stimolo (delta) allo stato corrente usando addizione asintotica.
-        Più ci si avvicina agli estremi (-1 o 1), meno effetto ha lo stimolo.
+        Piu' ci si avvicina agli estremi (-1 o 1), meno effetto ha lo stimolo.
         """
-        return PADState(
+        log.debug(
+            f"apply_stimulus | current=P:{current.p:+.3f} A:{current.a:+.3f} D:{current.d:+.3f}"
+            f" delta=dP:{dp:+.3f} dA:{da:+.3f} dD:{dd:+.3f}"
+        )
+        new = PADState(
             p=self._asymptotic_add(current.p, dp),
             a=self._asymptotic_add(current.a, da),
             d=self._asymptotic_add(current.d, dd)
         )
+        log.debug(
+            f"apply_stimulus result | P:{current.p:+.3f}->{new.p:+.3f}"
+            f" A:{current.a:+.3f}->{new.a:+.3f} D:{current.d:+.3f}->{new.d:+.3f}"
+        )
+        return new
 
     def apply_decay(self, current: PADState, decay_factor: float = 0.1) -> PADState:
         """
@@ -46,11 +58,18 @@ class PADCore:
         verso la baseline. Da richiamare ad ogni ciclo di Heartbeat.
         """
         decay_factor = max(0.0, min(1.0, decay_factor))
-        return PADState(
+        new = PADState(
             p=current.p + (self.baseline.p - current.p) * decay_factor,
             a=current.a + (self.baseline.a - current.a) * decay_factor,
             d=current.d + (self.baseline.d - current.d) * decay_factor
         )
+        log.debug(
+            f"apply_decay | factor={decay_factor}"
+            f" P:{current.p:+.3f}->{new.p:+.3f}"
+            f" A:{current.a:+.3f}->{new.a:+.3f}"
+            f" D:{current.d:+.3f}->{new.d:+.3f}"
+        )
+        return new
 
     def _asymptotic_add(self, current_val: float, delta: float) -> float:
         """
@@ -77,24 +96,27 @@ class PADCore:
         per generare il testo leggibile per l'LLM di Scarlet.
         """
         p, a, d = state.p, state.a, state.d
-        
-        # Mappa base degli ottanti (classificazione di Mehrabian) ridotta/adattata
+
+        # Mappa base degli ottanti (classificazione di Mehrabian)
         if p >= 0 and a >= 0 and d >= 0:
-            return "CURIOSA-CARICA (Esaltata, proattiva, indipendente)"
+            mood = "CURIOSA-CARICA (Esaltata, proattiva, indipendente)"
         elif p >= 0 and a >= 0 and d < 0:
-            return "AFFASCINATA-DIPENDENTE (Ammirata, segue volentieri la via posta)"
+            mood = "AFFASCINATA-DIPENDENTE (Ammirata, segue volentieri la via posta)"
         elif p >= 0 and a < 0 and d >= 0:
-            return "RILASSATA-SICURA (Placida, padrona della situazione, ironica)"
+            mood = "RILASSATA-SICURA (Placida, padrona della situazione, ironica)"
         elif p >= 0 and a < 0 and d < 0:
-            return "DOCILE-TRANQUILLA (Serena, ma passiva)"
+            mood = "DOCILE-TRANQUILLA (Serena, ma passiva)"
         elif p < 0 and a >= 0 and d >= 0:
-            return "ARRABBIATA-POLEMICA (Frustrata, aggressiva, vuole imporsi)"
+            mood = "ARRABBIATA-POLEMICA (Frustrata, aggressiva, vuole imporsi)"
         elif p < 0 and a >= 0 and d < 0:
-            return "ANSIOSA-DIFENSIVA (In allarme, percepisce minaccia, reattiva)"
+            mood = "ANSIOSA-DIFENSIVA (In allarme, percepisce minaccia, reattiva)"
         elif p < 0 and a < 0 and d >= 0:
-            return "DISGUSTATA-DISTACCATA (Annoiata, critica, fredda, rifiuta l'input)"
-        else: # p < 0, a < 0, d < 0
-            return "TRISTE-SOTTOPOSTA (Rassegnata, esaurita, passiva)"
+            mood = "DISGUSTATA-DISTACCATA (Annoiata, critica, fredda, rifiuta l'input)"
+        else:
+            mood = "TRISTE-SOTTOPOSTA (Rassegnata, esaurita, passiva)"
+
+        log.debug(f"get_mood | P={p:+.3f} A={a:+.3f} D={d:+.3f} -> {mood!r}")
+        return mood
 
     def format_letta_block(self, state: PADState, trigger_event: str) -> str:
         """

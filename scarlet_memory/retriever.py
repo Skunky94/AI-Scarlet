@@ -14,6 +14,10 @@ import os
 import requests
 import time
 from typing import List, Dict, Optional
+from scarlet_observability import get_logger
+
+log       = get_logger("memory.retriever")
+log_letta = get_logger("letta")
 
 
 class MemoryRetriever:
@@ -33,7 +37,7 @@ class MemoryRetriever:
         }
         self.top_k = top_k
         
-        # Leggi agent_id: env var (Docker) → file (host)
+        # Leggi agent_id: env var (Docker) -> file (host)
         self.agent_id = os.getenv("AGENT_ID", "").strip() or None
         if not self.agent_id:
             try:
@@ -41,7 +45,8 @@ class MemoryRetriever:
                     self.agent_id = f.read().strip()
             except Exception:
                 self.agent_id = None
-                print("[MemoryRetriever] WARN: AGENT_ID non trovato (env var o file)")
+                log.warning("AGENT_ID non trovato | controllare env var AGENT_ID o file .agent_id")
+        log.debug(f"MemoryRetriever init | letta={self.letta_url} agent_id={(str(self.agent_id)[:20] if self.agent_id else None)} top_k={self.top_k}")
     
     def search_memories(self, query: str, limit: int = None) -> List[dict]:
         """
@@ -50,9 +55,11 @@ class MemoryRetriever:
         """
         if not self.agent_id:
             return []
-        
+
         limit = limit or self.top_k
-        
+        log_letta.debug(f"archival search | query_preview={query[:60]!r} limit={limit}")
+
+        t0 = time.time()
         try:
             r = requests.get(
                 f"{self.letta_url}/v1/agents/{self.agent_id}/archival-memory/search",
@@ -60,10 +67,19 @@ class MemoryRetriever:
                 params={"query": query, "limit": limit},
                 timeout=10
             )
+            elapsed_ms = (time.time() - t0) * 1000
             if r.status_code == 200:
-                return r.json().get("results", [])
+                results = r.json().get("results", [])
+                for i, m in enumerate(results, 1):
+                    tags = m.get("tags", [])
+                    log_letta.debug(f"  memoria #{i} | [{tags[0] if tags else 'general'}] {m.get('content','')[:80]!r}")
+                log.info(f"search_memories OK | query_preview={query[:40]!r} results={len(results)} elapsed_ms={elapsed_ms:.0f}")
+                return results
+            else:
+                log_letta.warning(f"archival search error | status={r.status_code} elapsed_ms={elapsed_ms:.0f}")
         except Exception as e:
-            print(f"[MemoryRetriever] Search error: {e}")
+            elapsed_ms = (time.time() - t0) * 1000
+            log.warning(f"search_memories error | elapsed_ms={elapsed_ms:.0f} error={e}")
         return []
     
     def format_active_memories(self, memories: List[dict]) -> str:
@@ -87,7 +103,9 @@ class MemoryRetriever:
         """Aggiorna un memory block di Scarlet via Letta API."""
         if not self.agent_id:
             return False
-        
+
+        log_letta.debug(f"PATCH core-memory block | label={block_label} content_len={len(content)}")
+        t0 = time.time()
         try:
             r = requests.patch(
                 f"{self.letta_url}/v1/agents/{self.agent_id}/core-memory/blocks/{block_label}",
@@ -95,9 +113,15 @@ class MemoryRetriever:
                 json={"value": content},
                 timeout=5
             )
-            return r.status_code == 200
+            elapsed_ms = (time.time() - t0) * 1000
+            if r.status_code == 200:
+                log_letta.debug(f"Block update OK | label={block_label} elapsed_ms={elapsed_ms:.0f}")
+                return True
+            else:
+                log_letta.warning(f"Block update FALLITO | label={block_label} status={r.status_code} elapsed_ms={elapsed_ms:.0f}")
+                return False
         except Exception as e:
-            print(f"[MemoryRetriever] Block update error: {e}")
+            log.warning(f"update_memory_block error | label={block_label} error={e}")
             return False
     
     def ensure_block_exists(self, block_label: str, initial_value: str = "") -> bool:
@@ -130,11 +154,11 @@ class MemoryRetriever:
                 timeout=5
             )
             if r_create.status_code not in [200, 201]:
-                print(f"[MemoryRetriever] Block create failed: {r_create.text[:200]}")
+                log.warning(f"ensure_block_exists create failed | label={block_label} status={r_create.status_code} body={r_create.text[:200]!r}")
                 return False
-            
+
             block_id = r_create.json().get("id", "")
-            
+
             # Attacca al nostro agente
             r_attach = requests.patch(
                 f"{self.letta_url}/v1/agents/{self.agent_id}/core-memory/blocks/attach/{block_id}",
@@ -142,14 +166,14 @@ class MemoryRetriever:
                 timeout=5
             )
             if r_attach.status_code == 200:
-                print(f"[MemoryRetriever] Blocco '{block_label}' creato e attaccato")
+                log.info(f"ensure_block_exists | blocco '{block_label}' creato e attaccato | block_id={block_id}")
                 return True
             else:
-                print(f"[MemoryRetriever] Block attach failed: {r_attach.text[:200]}")
+                log.warning(f"ensure_block_exists attach failed | label={block_label} status={r_attach.status_code} body={r_attach.text[:200]!r}")
                 return False
-                
+
         except Exception as e:
-            print(f"[MemoryRetriever] Error creating block: {e}")
+            log.warning(f"ensure_block_exists error | label={block_label} error={e}")
             return False
     
     def feed_context(self, user_message: str) -> dict:
@@ -160,20 +184,26 @@ class MemoryRetriever:
         Returns: {"memories_found": int, "block_updated": bool}
         """
         t0 = time.time()
-        
+
         # 1. Cerca memorie rilevanti
+        log.debug(f"feed_context start | query_preview={user_message[:60]!r} top_k={self.top_k}")
         memories = self.search_memories(user_message, limit=self.top_k)
-        
+
         # 2. Formatta e aggiorna il blocco active_memories
         formatted = self.format_active_memories(memories)
+        log.debug(f"feed_context active_memories formatted | len={len(formatted)}")
         block_ok = self.update_memory_block("active_memories", formatted)
-        
+
         elapsed = (time.time() - t0) * 1000
         count = len(memories)
-        
+
+        log.info(
+            f"feed_context | memories_found={count} block_updated={block_ok}"
+            f" elapsed_ms={elapsed:.0f}"
+        )
         if count > 0:
-            print(f"[MemoryRetriever] Feed: {count} memorie richiamate in {elapsed:.0f}ms")
-        
+            log.debug(f"Memorie richiamate per contesto: {[m.get('content','')[:50] for m in memories]}")
+
         return {
             "memories_found": count,
             "block_updated": block_ok,
