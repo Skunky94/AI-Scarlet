@@ -9,6 +9,18 @@ Formato entry: `type(scope): descrizione` — file modificati, data, categoria.
 <!-- ENTRIES -->
 ---
 
+## [2026-02-28] `chore(workflow)` - aggiunge commit helper e changelog automatizzato
+
+**Categoria:** Manutenzione
+
+scripts/commit.ps1: script PowerShell interattivo per Conventional Commits + aggiornamento CHANGELOG.md automatico. scripts/hooks/commit-msg: hook git per validare formato messaggi. .gitignore: aggiunge .cache/ e .memvid/.
+
+### File
+- `.gitignore` *(modified)*
+- `scripts/commit.ps1` *(new)*
+- `scripts/hooks/commit-msg` *(new)*
+---
+
 ## [2026-02-28] `infra(docker)` - containerizza gateway e unifica stack di avvio
 
 **Categoria:** Infrastruttura

@@ -32,6 +32,12 @@ scripts/*.txt
 # Archival memory export (troppo grande, contiene embeddings)
 config/archival_memory.json
 
+# Cache modelli HuggingFace (DistilBERT, scaricata automaticamente)
+.cache/
+
+# Memoria persistente agente Copilot (locale, non condivisibile)
+.memvid/
+
 # IDE
 .vscode/
 .idea/

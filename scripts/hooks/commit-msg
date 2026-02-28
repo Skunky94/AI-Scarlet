@@ -1,0 +1,54 @@
+#!/bin/sh
+# ============================================================
+# Git hook: commit-msg
+# Valida il formato Conventional Commits prima di ogni commit.
+#
+# Formato atteso: type(scope): descrizione
+# Tipi validi: feat, fix, refactor, docs, chore, infra, test, style
+#
+# Installato automaticamente in .git/hooks/commit-msg
+# NON modificare manualmente — rinstallare con:
+#   Copy-Item scripts/hooks/commit-msg .git/hooks/commit-msg
+# ============================================================
+
+MSG_FILE="$1"
+MSG=$(cat "$MSG_FILE")
+
+# Ignora commit di merge, revert, amend automatici
+if echo "$MSG" | grep -qE "^(Merge|Revert|fixup!|squash!)"; then
+    exit 0
+fi
+
+# Pattern Conventional Commits:
+# type(scope): descrizione   oppure   type: descrizione
+PATTERN="^(feat|fix|refactor|docs|chore|infra|test|style)(\([a-zA-Z0-9_-]+\))?: .{1,100}$"
+
+if ! echo "$MSG" | grep -qE "$PATTERN"; then
+    echo ""
+    echo "  ERRORE: Messaggio di commit non conforme a Conventional Commits."
+    echo ""
+    echo "  Formato atteso:"
+    echo "    type(scope): descrizione breve"
+    echo "    type: descrizione breve"
+    echo ""
+    echo "  Tipi validi:"
+    echo "    feat     — nuova funzionalità"
+    echo "    fix      — correzione bug"
+    echo "    refactor — refactoring"
+    echo "    docs     — documentazione"
+    echo "    chore    — manutenzione"
+    echo "    infra    — infrastruttura (Docker, compose)"
+    echo "    test     — test"
+    echo "    style    — formattazione"
+    echo ""
+    echo "  Esempi validi:"
+    echo "    feat(gateway): aggiunge endpoint /health"
+    echo "    fix(pad): corregge decadimento PAD negativo"
+    echo "    infra(docker): containerizza gateway FastAPI"
+    echo ""
+    echo "  Tuo messaggio: $MSG"
+    echo ""
+    exit 1
+fi
+
+exit 0
