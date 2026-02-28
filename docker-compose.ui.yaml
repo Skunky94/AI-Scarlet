@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: scarlet-ui
+    environment:
+      # Disabilitiamo i check di avvio di OpenAI poichè stiamo mockando l'endpoint
+      - OPENAI_API_KEY=scarlet_dev
+      # IMPORTANTE: host.docker.internal permette al container docker di pingare il nostro localhost (FastAPI hub su porta 8000)
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      - WEBUI_AUTH=False
+      - ENABLE_OLLAMA_API=False
+    ports:
+      - "3000:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - open-webui-data:/app/backend/data
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:

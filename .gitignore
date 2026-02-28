@@ -9,6 +9,9 @@
 .letta/
 .ollama/
 
+# Agent ID (generato da Letta, unico per istanza)
+.agent_id
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,6 +24,13 @@ build/
 .venv/
 venv/
 ENV/
+
+# Log e output temporanei
+*.log
+scripts/*.txt
+
+# Archival memory export (troppo grande, contiene embeddings)
+config/archival_memory.json
 
 # IDE
 .vscode/

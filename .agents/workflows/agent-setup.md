@@ -2,9 +2,16 @@
 description: Create or recreate the Scarlet agent on Letta with MiniMax M2.5 (create-then-patch approach)
 ---
 
-# Setup Agente Scarlet
+## 🧠 Workflow: Configurazione e Creazione Agente
 
-// turbo-all
+Lo script `create_agent.py` è uno strumento *stateless* che legge "l'identità" di Scarlet da un file di configurazione `YAML` e la instrada nell'API di Letta. Non contiene più i prompt o i blocchi hardcoded.
+
+### Step 1: Modifica Identità (Single Source of Truth)
+Se vuoi cambiare la personalità di Scarlet, i pattern cognitivi, i prompt di sistema o aggiungere informazioni al suo "mondo interiore" fisso iniziale, modificalo nell'unico file designato:
+- **`h:/AI-Scarlet/.agents/config/cognitive_v2.yaml`**
+
+### Step 2: Deployment
+Una volta configurata l'identità nel file YAML, esegui il setup (eliminerà l'agente precedente e ne forgerà uno nuovo col medesimo modello, ma memoria fresca):
 
 1. Assicurati che lo stack Docker sia attivo (esegui `/deploy` se necessario).
 

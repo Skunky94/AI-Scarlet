@@ -1,0 +1,27 @@
+[
+    {
+        "name": "archival_memory_search",
+        "description": "Search archival memory using semantic similarity to find relevant information.",
+        "type": "letta_builtin"
+    },
+    {
+        "name": "archival_memory_insert",
+        "description": "Add information to long-term archival memory for later retrieval.",
+        "type": "letta_builtin"
+    },
+    {
+        "name": "conversation_search",
+        "description": "Search prior conversation history using hybrid search (text + semantic similarity).",
+        "type": "letta_builtin"
+    },
+    {
+        "name": "core_memory_replace",
+        "description": "Replace the contents of core memory. To delete memories, use an empty string for new_content.",
+        "type": "letta_builtin"
+    },
+    {
+        "name": "core_memory_append",
+        "description": "Append to the contents of core memory.",
+        "type": "letta_builtin"
+    }
+]
