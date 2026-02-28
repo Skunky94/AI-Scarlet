@@ -36,6 +36,17 @@ class ChatCompletionRequest(BaseModel):
     messages: List[ChatCompletionMessage]
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
+    user: Optional[str] = None  # OpenAI standard field — usato come user_id
+
+
+def _extract_user_id(req: "ChatCompletionRequest") -> str:
+    """
+    Determina lo user_id dalla richiesta.
+    Priorità: campo 'user' OpenAI -> 'default'.
+    In futuro: header JWT, session token, etc.
+    """
+    uid = (req.user or "").strip()
+    return uid if uid else "default"
 
 @router.get("/models")
 async def get_openai_models():
@@ -134,14 +145,18 @@ async def openai_chat_completions(req: ChatCompletionRequest):
         }
     # ------------------------------------------------
 
+    # Estrai user_id (usato per tutto il pipeline)
+    user_id = _extract_user_id(req)
+    log.debug(f"user_id={user_id!r}")
+
     # STEP 0.5: Memory Retrieval (pre-turno)
     try:
-        log.debug(f"Step 0.5 Memory Retrieval | query_preview={user_text[:60]!r}")
+        log.debug(f"Step 0.5 Memory Retrieval | user_id={user_id!r} query_preview={user_text[:60]!r}")
         t_mem = time.time()
-        mem_feed = _memory_retriever.feed_context(user_text)
+        mem_feed = _memory_retriever.feed_context(user_text, user_id=user_id)
         elapsed_mem = (time.time() - t_mem) * 1000
         log.info(
-            f"Step 0.5 Memory Retrieval OK | memories_found={mem_feed['memories_found']}"
+            f"Step 0.5 Memory Retrieval OK | user_id={user_id!r} memories_found={mem_feed['memories_found']}"
             f" block_updated={mem_feed.get('block_updated')} elapsed_ms={elapsed_mem:.0f}"
         )
     except Exception as e:
@@ -166,6 +181,9 @@ async def openai_chat_completions(req: ChatCompletionRequest):
         ))
         elapsed_upd = (time.time() - t_upd) * 1000
         log.info(f"Step 2 PAD Update OK | P={upd_resp.p:+.3f} A={upd_resp.a:+.3f} D={upd_resp.d:+.3f} mood={upd_resp.new_mood!r} elapsed_ms={elapsed_upd:.1f}")
+
+        # Snapshot PAD per la memoria (disponibile nel closure stream / non-stream)
+        pad_state = (upd_resp.p, upd_resp.a, upd_resp.d)
 
         # STEP 2.5: Modulazione parametri LLM basata su PAD
         log.debug(f"Step 2.5 LLM Modulation | P={upd_resp.p:+.3f} A={upd_resp.a:+.3f} D={upd_resp.d:+.3f}")
@@ -265,12 +283,13 @@ async def openai_chat_completions(req: ChatCompletionRequest):
 
             if visible_text:
                 log.info(
-                    f"Step 4 BACKGROUND Memory Save | user_len={len(user_text)}"
+                    f"Step 4 BACKGROUND Memory Save | user_id={user_id!r} user_len={len(user_text)}"
                     f" response_len={len(visible_text)} think_len={len(think_text)}"
                 )
                 threading.Thread(
                     target=_memory_agent.process_turn,
                     args=(user_text, think_text, visible_text),
+                    kwargs={"user_id": user_id, "pad_state": pad_state},
                     daemon=True
                 ).start()
             else:
@@ -292,6 +311,19 @@ async def openai_chat_completions(req: ChatCompletionRequest):
         elapsed_chat = (time.time() - t_chat) * 1000
         log.error(f"Errore chiamata Letta non-stream | elapsed_ms={elapsed_chat:.0f} error={e} traceback={traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+    # STEP 4 NON-STREAM: Memory Save in background
+    import re as _re
+    _think_match = _re.findall(r'<think>(.*?)</think>', chat_resp.response, _re.DOTALL)
+    _think_text = "\n".join(_think_match) if _think_match else ""
+    _visible_text = _re.sub(r'<think>.*?</think>', '', chat_resp.response, flags=_re.DOTALL).strip()
+    if _visible_text:
+        threading.Thread(
+            target=_memory_agent.process_turn,
+            args=(user_text, _think_text, _visible_text),
+            kwargs={"user_id": user_id, "pad_state": pad_state},
+            daemon=True
+        ).start()
 
     openai_response = {
         "id": response_id,

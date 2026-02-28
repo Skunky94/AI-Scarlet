@@ -18,7 +18,7 @@ import json
 import time
 import threading
 import requests
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from scarlet_observability import get_logger
 
@@ -38,20 +38,49 @@ class MemoryItem:
 
 MEMORY_CATEGORIES = [
     "user_profile",      # Chi è l'utente
-    "user_preference",   # Preferenze specifiche
-    "relationship",      # Dinamica relazionale
-    "event",             # Evento significativo
-    "knowledge",         # Fatto/conoscenza appresa
-    "emotion",           # Momento emotivo importante
+    "user_preference",   # Preferenze specifiche dell'utente
+    "relationship",      # Dinamica relazionale Scarlet↔Utente
+    "event",             # Evento significativo nella relazione
+    "knowledge",         # Fatto/conoscenza appresa sul mondo
+    "emotion",           # Risposta emotiva di Scarlet in questo momento
 ]
 
-EXTRACTION_PROMPT = """Sei il sistema di memoria di Scarlet, un'intelligenza artificiale. 
+# Ownership: a chi appartiene ogni tipo di memoria.
+# "user"    → specifica per l'utente corrente  (filtrata per user_id in multi-user)
+# "world"   → conoscenza condivisa, visibile a tutti gli utenti
+# "scarlet" → appartiene a Scarlet come individuo (non legata a nessun utente)
+CATEGORY_OWNER: Dict[str, str] = {
+    "user_profile":    "user",
+    "user_preference": "user",
+    "relationship":    "user",
+    "event":           "user",
+    "knowledge":       "world",
+    "emotion":         "scarlet",
+}
+
+EXTRACTION_PROMPT = """Sei il sistema di memoria di Scarlet, un'intelligenza artificiale.
 Il tuo compito è analizzare la conversazione e identificare informazioni da memorizzare.
+
+PERSONAGGI NELLA CONVERSAZIONE:
+- "l'utente" o "user" = la persona umana che parla con Scarlet
+- "Scarlet" = l'intelligenza artificiale (NON l'utente)
+
+CATEGORIE E LORO SOGGETTO:
+- user_profile     → chi è L'UTENTE (es. professione, età, luogo)
+- user_preference  → preferenze DI L'UTENTE (cosa piace/non piace ALL'UTENTE)
+- relationship     → la dinamica tra Scarlet e L'UTENTE
+- event            → evento importante accaduto nella conversazione
+- knowledge        → fatto/conoscenza appresa SUL MONDO (valida indipendentemente dall'utente)
+- emotion          → risposta emotiva DI SCARLET in questo momento (NON dell'utente)
+
+ATTENZIONE CRITICA:
+- Se l'informazione riguarda Scarlet ("Scarlet vuole...", "Scarlet si sente...") usa SOLO 'emotion' o NON salvare
+- Se riguarda L'UTENTE ("l'utente preferisce...", "l'utente lavora come...") usa user_profile o user_preference
+- NON salvare come user_preference le caratteristiche di Scarlet
 
 REGOLE:
 - Estrai SOLO informazioni utili e significative, non banalità
 - Ogni memoria deve essere un fatto concreto, una preferenza, o un evento importante
-- Usa categorie: user_profile, user_preference, relationship, event, knowledge, emotion
 - Rispondi SOLO con JSON valido, nessun altro testo
 - Se non c'è nulla da memorizzare, rispondi con {"memories": []}
 
@@ -206,23 +235,37 @@ RISPOSTA SCARLET:
             log.error(f"extract_memories ERRORE | error={e}")
             return []
     
-    def _search_similar(self, text: str, limit: int = 3) -> List[dict]:
-        """Cerca memorie simili in archival memory."""
+    def _search_similar(
+        self,
+        text: str,
+        limit: int = 3,
+        owner_filter: Optional[str] = None,
+    ) -> List[dict]:
+        """
+        Cerca memorie simili in archival memory.
+        Se owner_filter è fornito, filtra client-side per mantenere solo
+        memorie dello stesso owner (o legacy senza owner tag).
+        """
         if not self.agent_id:
             return []
 
+        # Richiediamo più risultati per compensare il filtraggio client-side
+        fetch_limit = limit * 3 if owner_filter else limit
         try:
-            log_letta.debug(f"archival search | query_preview={text[:60]!r} limit={limit}")
+            log_letta.debug(f"archival search | query_preview={text[:60]!r} limit={fetch_limit} owner_filter={owner_filter!r}")
             t0 = time.time()
             r = requests.get(
                 f"{self.letta_url}/v1/agents/{self.agent_id}/archival-memory/search",
                 headers=self.letta_headers,
-                params={"query": text, "limit": limit},
+                params={"query": text, "limit": fetch_limit},
                 timeout=30
             )
             elapsed_ms = (time.time() - t0) * 1000
             if r.status_code == 200:
                 results = r.json().get("results", [])
+                if owner_filter:
+                    results = self._filter_by_owner_tag(results, owner_filter)
+                results = results[:limit]
                 log_letta.debug(f"archival search OK | results={len(results)} elapsed_ms={elapsed_ms:.0f}")
                 return results
             else:
@@ -230,6 +273,24 @@ RISPOSTA SCARLET:
         except Exception as e:
             log.warning(f"_search_similar error | error={e}")
         return []
+
+    @staticmethod
+    def _filter_by_owner_tag(memories: List[dict], owner_tag: str) -> List[dict]:
+        """
+        Filtra lista di memorie per owner tag client-side.
+        Memorie senza tag owner (legacy) vengono sempre incluse per
+        compatibilità retroattiva.
+        """
+        result = []
+        for m in memories:
+            tags = m.get("tags") or []
+            owner_tags = [t for t in tags if t.startswith("owner:")]
+            # Nessun owner tag = memoria legacy, includi sempre
+            if not owner_tags:
+                result.append(m)
+            elif owner_tag in owner_tags:
+                result.append(m)
+        return result
     
     def _insert_memory(self, text: str, tags: List[str]) -> bool:
         """Inserisce una memoria nell'archival memory."""
@@ -282,18 +343,46 @@ RISPOSTA SCARLET:
             log.warning(f"_delete_memory error | memory_id={memory_id} error={e}")
             return False
     
-    def save_memories(self, memories: List[MemoryItem]) -> dict:
+    def save_memories(
+        self,
+        memories: List[MemoryItem],
+        user_id: str = "default",
+        pad_state: Optional[Tuple[float, float, float]] = None,
+    ) -> dict:
         """
         Salva le memorie estratte in archival memory.
-        Gestisce deduplicazione: se una memoria simile esiste, la aggiorna.
-        
+        Gestisce deduplicazione scoped per owner e attach PAD salience.
+
+        Tag applicati a ogni memoria:
+        - Categoria semantica (es. 'user_preference')
+        - Owner (es. 'owner:user:davide', 'owner:world', 'owner:scarlet')
+        - PAD encoding (es. 'pad:+0.21:+0.52:+0.11') se pad_state disponibile
+
         Returns: {"created": int, "updated": int, "skipped": int}
         """
         stats = {"created": 0, "updated": 0, "skipped": 0}
 
         for mem in memories:
-            # Cerca duplicati
-            similar = self._search_similar(mem.content, limit=3)
+            # Determina owner tag in base alla categoria
+            owner_type = CATEGORY_OWNER.get(mem.category, "user")
+            owner_tag = (
+                f"owner:user:{user_id}" if owner_type == "user"
+                else f"owner:{owner_type}"
+            )
+
+            # Costruisci i tag per questa memoria
+            tags = [mem.category, owner_tag]
+            if pad_state is not None:
+                P, A, D = pad_state
+                tags.append(f"pad:{P:+.2f}:{A:+.2f}:{D:+.2f}")
+
+            log.debug(
+                f"save_memories prepare | category={mem.category}"
+                f" owner={owner_tag!r} pad={pad_state}"
+            )
+
+            # Cerca duplicati nello stesso owner-scope
+            similar = self._search_similar(mem.content, limit=3, owner_filter=owner_tag)
 
             # Controlla se esiste una memoria molto simile
             duplicate_found = False
@@ -310,17 +399,17 @@ RISPOSTA SCARLET:
                     log.debug(f"Dedup SIMILE (update) | new={mem.content[:50]!r} existing={existing_text[:50]!r}")
                     old_id = existing.get("id", "")
                     if old_id and self._delete_memory(old_id):
-                        if self._insert_memory(mem.content, [mem.category]):
+                        if self._insert_memory(mem.content, tags):
                             stats["updated"] += 1
                             duplicate_found = True
                             break
 
             if not duplicate_found:
-                if self._insert_memory(mem.content, [mem.category]):
-                    log.debug(f"Memoria creata | category={mem.category} content_preview={mem.content[:60]!r}")
+                if self._insert_memory(mem.content, tags):
+                    log.debug(f"Memoria creata | category={mem.category} owner={owner_tag!r} content_preview={mem.content[:60]!r}")
                     stats["created"] += 1
 
-        log.info(f"save_memories | created={stats['created']} updated={stats['updated']} skipped={stats['skipped']}")
+        log.info(f"save_memories | user_id={user_id!r} created={stats['created']} updated={stats['updated']} skipped={stats['skipped']}")
         return stats
     
     def _is_duplicate(self, new: str, existing: str) -> bool:
@@ -338,30 +427,46 @@ RISPOSTA SCARLET:
         overlap = len(new_words & existing_words) / max(len(new_words), len(existing_words))
         return overlap > 0.6  # 60% overlap = simili
     
-    def process_turn(self, user_msg: str, think: str, response: str) -> dict:
+    def process_turn(
+        self,
+        user_msg: str,
+        think: str,
+        response: str,
+        user_id: str = "default",
+        pad_state: Optional[Tuple[float, float, float]] = None,
+    ) -> dict:
         """
         Pipeline completa: estrai memorie dal turno e salvale.
         Chiamato in background dopo ogni risposta di Scarlet.
+
+        Args:
+            user_msg:  Messaggio dell'utente
+            think:     Blocco <think> di Scarlet per questo turno
+            response:  Risposta visibile di Scarlet
+            user_id:   Identità dell'utente (per ownership e multi-user)
+            pad_state: Snapshot PAD al momento della risposta (P, A, D),
+                       usato per codificare la salienza emotiva della memoria
         """
         t0 = time.time()
         log.debug(
-            f"process_turn start | user_len={len(user_msg)}"
+            f"process_turn start | user_id={user_id!r} user_len={len(user_msg)}"
             f" think_len={len(think)} response_len={len(response)}"
+            f" pad_state={pad_state}"
         )
 
         # 1. Estrai
         memories = self.extract_memories(user_msg, think, response)
 
         if not memories:
-            log.info("process_turn | nessuna memoria da salvare")
+            log.info(f"process_turn | user_id={user_id!r} nessuna memoria da salvare")
             return {"created": 0, "updated": 0, "skipped": 0}
 
-        # 2. Salva con deduplicazione
-        stats = self.save_memories(memories)
+        # 2. Salva con ownership, PAD salience e deduplicazione
+        stats = self.save_memories(memories, user_id=user_id, pad_state=pad_state)
 
         elapsed = time.time() - t0
         log.info(
-            f"process_turn completato | elapsed_s={elapsed:.1f}"
+            f"process_turn completato | user_id={user_id!r} elapsed_s={elapsed:.1f}"
             f" created={stats['created']} updated={stats['updated']} skipped={stats['skipped']}"
         )
         return stats

@@ -4,6 +4,19 @@
 
 Scarlet è un agente AI autonomo con coscienza emotiva (PAD Engine), memoria persistente (Archival + Memory Blocks) e personalità emergente. NON è un chatbot — è un individuo digitale.
 
+## Regola Operativa Fondamentale — Conferma Prima di Implementare
+
+> **SEMPRE valido, senza eccezioni, senza che l'utente debba ricordarlo.**
+
+Prima di qualsiasi implementazione (scrittura/modifica file, creazione file, configurazione, esecuzione comandi con effetti, commit), **discutere sempre il piano con l'utente** e attendere la sua conferma esplicita prima di procedere.
+
+- ✅ Leggere codice, file, documentazione → libero
+- ✅ Proporre piani, analisi, domande → libero
+- ❌ Scrivere/modificare file → solo dopo conferma esplicita
+- ❌ Eseguire comandi con effetti (git, docker, ecc.) → solo dopo conferma esplicita
+
+---
+
 ## Stack Tecnologico
 
 - **Runtime**: Python 3.13, FastAPI, Uvicorn
