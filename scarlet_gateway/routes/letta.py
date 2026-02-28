@@ -22,6 +22,7 @@ HEADERS = {
 class ChatRequest(BaseModel):
     message: str
     stream: bool = False
+    system_prefix: Optional[str] = None  # Contesto temporale/sistema da iniettare prima del messaggio utente
 
 class ChatResponse(BaseModel):
     response: str
@@ -47,13 +48,14 @@ async def chat_letta(req: ChatRequest):
     agent_id = _get_agent_id()
     url = f"{LETTA_URL}/v1/agents/{agent_id}/messages"
 
+    # Costruisci lista messaggi con eventuale prefisso di sistema (es. contesto temporale)
+    _msg_list = []
+    if req.system_prefix:
+        _msg_list.append({"role": "system", "content": req.system_prefix})
+    _msg_list.append({"role": "user", "content": req.message})
+
     payload = {
-        "messages": [
-            {
-                "role": "user",
-                "content": req.message
-            }
-        ],
+        "messages": _msg_list,
         "stream": req.stream
     }
 
@@ -104,7 +106,7 @@ async def chat_letta(req: ChatRequest):
         raise HTTPException(status_code=502, detail=f"Connessione a Letta fallita: {e}")
 
 
-def stream_letta_sse(message: str):
+def stream_letta_sse(message: str, system_prefix: Optional[str] = None):
     """
     Generatore sincrono che chiama l'endpoint SSE di Letta (/messages/stream)
     e yield-a ogni linea SSE man mano che arriva.
@@ -113,8 +115,14 @@ def stream_letta_sse(message: str):
     agent_id = _get_agent_id()
     url = f"{LETTA_URL}/v1/agents/{agent_id}/messages/stream"
 
+    # Costruisci lista messaggi con eventuale prefisso di sistema
+    _sse_messages = []
+    if system_prefix:
+        _sse_messages.append({"role": "system", "content": system_prefix})
+    _sse_messages.append({"role": "user", "content": message})
+
     payload = {
-        "messages": [{"role": "user", "content": message}],
+        "messages": _sse_messages,
         "stream_tokens": True
     }
 

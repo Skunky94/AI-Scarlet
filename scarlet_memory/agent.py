@@ -30,9 +30,10 @@ log_letta = get_logger("letta")
 @dataclass
 class MemoryItem:
     """Una singola memoria estratta."""
-    action: str       # "create" o "update"
-    category: str     # user_profile, user_preference, relationship, event, knowledge, emotion
-    content: str      # Testo della memoria
+    action: str        # "create" o "update"
+    category: str      # user_profile, user_preference, relationship, event, knowledge, emotion
+    content: str       # Testo della memoria
+    importance: int = 3  # 1-5: 1=banale, 3=rilevante, 5=fondamentale
     old_id: Optional[str] = None  # ID memoria da aggiornare (per update)
 
 
@@ -84,11 +85,18 @@ REGOLE:
 - Rispondi SOLO con JSON valido, nessun altro testo
 - Se non c'è nulla da memorizzare, rispondi con {"memories": []}
 
+IMPORTANZA (obbligatoria per ogni memoria):
+- 1: informazione banale o ridondante
+- 2: utile ma poco significativa
+- 3: rilevante, vale la pena ricordare
+- 4: importante, probabilmente influenzerà conversazioni future
+- 5: fondamentale per la relazione o l'identità di Scarlet
+
 FORMATO OUTPUT:
-{"memories": [{"action": "create", "category": "categoria", "content": "testo memoria"}]}
+{"memories": [{"action": "create", "category": "categoria", "content": "testo memoria", "importance": 3}]}
 
 Se una memoria AGGIORNA una esistente, usa action "update" e includi la vecchia memoria in "old_content":
-{"memories": [{"action": "update", "category": "categoria", "content": "nuovo testo", "old_content": "vecchio testo simile"}]}
+{"memories": [{"action": "update", "category": "categoria", "content": "nuovo testo", "old_content": "vecchio testo simile", "importance": 4}]}
 """
 
 
@@ -222,6 +230,7 @@ RISPOSTA SCARLET:
                     action=m.get("action", "create"),
                     category=m["category"],
                     content=m["content"],
+                    importance=max(1, min(5, int(m.get("importance", 3)))),
                     old_id=None
                 ))
 
@@ -362,7 +371,15 @@ RISPOSTA SCARLET:
         """
         stats = {"created": 0, "updated": 0, "skipped": 0}
 
+        from datetime import date as _date
+
         for mem in memories:
+            # Salta memorie a bassa importanza (rumore cognitivo)
+            if mem.importance < 3:
+                log.debug(f"skip low-importance | importance={mem.importance} content={mem.content[:50]!r}")
+                stats["skipped"] += 1
+                continue
+
             # Determina owner tag in base alla categoria
             owner_type = CATEGORY_OWNER.get(mem.category, "user")
             owner_tag = (
@@ -370,8 +387,13 @@ RISPOSTA SCARLET:
                 else f"owner:{owner_type}"
             )
 
-            # Costruisci i tag per questa memoria
-            tags = [mem.category, owner_tag]
+            # Costruisci i tag per questa memoria (categoria + owner + data + importanza + PAD)
+            tags = [
+                mem.category,
+                owner_tag,
+                f"ts:{_date.today().isoformat()}",   # Fase 1: timestamp per recency decay
+                f"imp:{mem.importance}",               # Fase 2: importanza per re-ranking
+            ]
             if pad_state is not None:
                 P, A, D = pad_state
                 tags.append(f"pad:{P:+.2f}:{A:+.2f}:{D:+.2f}")
@@ -406,26 +428,128 @@ RISPOSTA SCARLET:
 
             if not duplicate_found:
                 if self._insert_memory(mem.content, tags):
-                    log.debug(f"Memoria creata | category={mem.category} owner={owner_tag!r} content_preview={mem.content[:60]!r}")
+                    log.debug(f"Memoria creata | category={mem.category} owner={owner_tag!r} importance={mem.importance} content_preview={mem.content[:60]!r}")
                     stats["created"] += 1
+
+                    # Fase 5: importanza >= 4 → aggiorna blocchi evolutivi
+                    if mem.importance >= 4:
+                        if mem.category == "emotion":
+                            threading.Thread(
+                                target=self._append_to_block,
+                                args=("inner_world", mem.content),
+                                daemon=True
+                            ).start()
+                        elif mem.category == "relationship":
+                            threading.Thread(
+                                target=self._append_to_block,
+                                args=("relationships", mem.content),
+                                daemon=True
+                            ).start()
 
         log.info(f"save_memories | user_id={user_id!r} created={stats['created']} updated={stats['updated']} skipped={stats['skipped']}")
         return stats
     
+    # ─── Deduplication semantica (Fase 5) ────────────────────────────────────
+
+    def _get_embedding(self, text: str) -> Optional[list]:
+        """
+        Chiama mxbai-embed-large via Ollama per ottenere l'embedding del testo.
+        Fallisce silenziosamente: ritorna None se Ollama non risponde.
+        """
+        try:
+            r = requests.post(
+                f"{self.ollama_url}/api/embeddings",
+                json={"model": "mxbai-embed-large", "prompt": text},
+                timeout=8
+            )
+            if r.status_code == 200:
+                return r.json().get("embedding")
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _cosine_similarity(a: list, b: list) -> float:
+        """Cosine similarity tra due vettori 1024-dim."""
+        import math
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = math.sqrt(sum(x * x for x in a))
+        mag_b = math.sqrt(sum(x * x for x in b))
+        if not mag_a or not mag_b:
+            return 0.0
+        return dot / (mag_a * mag_b)
+
     def _is_duplicate(self, new: str, existing: str) -> bool:
-        """Due testi sono considerati duplicati se uno contiene l'altro."""
-        new_lower = new.lower().strip()
-        existing_lower = existing.lower().strip()
-        return new_lower == existing_lower or new_lower in existing_lower or existing_lower in new_lower
-    
+        """
+        Duplicato semantico: cosine similarity >= 0.85 (via embedding),
+        con fallback su match letterale se embedding non disponibile.
+        """
+        emb_new = self._get_embedding(new)
+        emb_ex  = self._get_embedding(existing)
+        if emb_new and emb_ex:
+            return self._cosine_similarity(emb_new, emb_ex) >= 0.85
+        # Fallback: match letterale
+        n, e = new.lower().strip(), existing.lower().strip()
+        return n == e or n in e or e in n
+
     def _is_similar(self, new: str, existing: str) -> bool:
-        """Due testi sono simili se condividono molte parole chiave."""
+        """
+        Simile ma non identico: cosine similarity 0.70–0.84 (via embedding),
+        con fallback su word-overlap 60%.
+        """
+        emb_new = self._get_embedding(new)
+        emb_ex  = self._get_embedding(existing)
+        if emb_new and emb_ex:
+            sim = self._cosine_similarity(emb_new, emb_ex)
+            return 0.70 <= sim < 0.85
+        # Fallback: word overlap
         new_words = set(new.lower().split())
         existing_words = set(existing.lower().split())
         if not new_words or not existing_words:
             return False
         overlap = len(new_words & existing_words) / max(len(new_words), len(existing_words))
-        return overlap > 0.6  # 60% overlap = simili
+        return overlap > 0.6
+
+    # ─── Blocchi evolutivi (Fase 5) ────────────────────────────────────────────
+
+    def _append_to_block(self, block_label: str, text: str) -> bool:
+        """
+        Appende un testo datato a un memory block di Letta.
+        Usato per aggiornare inner_world (emotion) e relationships (relationship)
+        quando vengono salvate memorie con importanza >= 4.
+        """
+        if not self.agent_id:
+            return False
+        from datetime import date as _date
+        try:
+            # 1. Leggi valore corrente
+            r = requests.get(
+                f"{self.letta_url}/v1/agents/{self.agent_id}/core-memory/blocks/{block_label}",
+                headers=self.letta_headers,
+                timeout=5
+            )
+            if r.status_code != 200:
+                log.debug(f"_append_to_block GET fallito | label={block_label} status={r.status_code}")
+                return False
+            current = r.json().get("value", "")
+
+            # 2. Appendi con timestamp
+            new_content = current.rstrip() + f"\n\n[{_date.today().isoformat()}] {text}"
+
+            # 3. PATCH
+            r2 = requests.patch(
+                f"{self.letta_url}/v1/agents/{self.agent_id}/core-memory/blocks/{block_label}",
+                headers=self.letta_headers,
+                json={"value": new_content},
+                timeout=5
+            )
+            if r2.status_code == 200:
+                log_letta.debug(f"_append_to_block OK | label={block_label} appended_len={len(text)}")
+                return True
+            log.debug(f"_append_to_block PATCH fallito | label={block_label} status={r2.status_code}")
+        except Exception as e:
+            log.debug(f"_append_to_block error | label={block_label} error={e}")
+        return False
     
     def process_turn(
         self,

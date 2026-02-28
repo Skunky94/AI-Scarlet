@@ -99,6 +99,8 @@ services:
       - OLLAMA_URL=http://ollama:11434
       # Chiave API Letta (stessa password configurata nel servizio letta)
       - LETTA_API_KEY=${LETTA_SERVER_PASSWORD}
+      # Chiave API MiniMax (usata dal ContextCompressor per generare summaries cognitive)
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
       # AGENT_ID opzionale: se vuoto, il gateway legge da /app/.agent_id (montato sopra)
       - AGENT_ID=
     restart: unless-stopped

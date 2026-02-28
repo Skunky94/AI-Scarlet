@@ -5,16 +5,18 @@ import json
 import asyncio
 import threading
 import traceback
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from scarlet_gateway.routes.pad import evaluate_pad, update_pad, EvaluateRequest, UpdateRequest
 from scarlet_gateway.routes.letta import chat_letta, ChatRequest, stream_letta_sse
 from scarlet_pad.modulator import PADModulator
 from scarlet_memory.agent import MemoryAgent
 from scarlet_memory.retriever import MemoryRetriever
+from scarlet_memory.compressor import ContextCompressor
 from scarlet_observability import get_logger
 import re
 
@@ -22,9 +24,74 @@ router = APIRouter()
 log = get_logger("gateway.openai")
 
 # Singletons
-_pad_modulator = PADModulator()
-_memory_agent = MemoryAgent()
+_pad_modulator    = PADModulator()
+_memory_agent     = MemoryAgent()
 _memory_retriever = MemoryRetriever()
+
+# Stato modulo: PAD dell'ultimo turno (usato per emotional retrieval nel prossimo turno)
+_last_pad_state: Optional[Tuple[float, float, float]] = None
+
+# Context Compressor — inizializzato lazy al primo turno (quando agent_id è disponibile)
+_context_compressor: Optional[ContextCompressor] = None
+_compressor_lock = threading.Lock()
+
+
+def _get_or_create_compressor() -> Optional[ContextCompressor]:
+    """Inizializza il compressor singleton la prima volta che è necessario."""
+    global _context_compressor
+    if _context_compressor is not None:
+        return _context_compressor
+    with _compressor_lock:
+        if _context_compressor is not None:
+            return _context_compressor
+        try:
+            import os
+            agent_id = os.getenv("AGENT_ID", "").strip()
+            if not agent_id:
+                with open(".agent_id") as f:
+                    agent_id = f.read().strip()
+            letta_url  = os.getenv("LETTA_URL",  "http://letta:8283")
+            letta_key  = os.getenv("LETTA_API_KEY", "scarlet_dev")
+            minimax_key = os.getenv("MINIMAX_API_KEY", "")
+            ollama_url  = os.getenv("OLLAMA_URL", "http://ollama:11434")
+            _context_compressor = ContextCompressor(
+                letta_url=letta_url,
+                letta_headers={
+                    "Authorization": f"Bearer {letta_key}",
+                    "Content-Type":  "application/json"
+                },
+                agent_id=agent_id,
+                minimax_url="https://api.minimax.io/v1",
+                minimax_api_key=minimax_key,
+                ollama_url=ollama_url,
+            )
+            log.info("ContextCompressor inizializzato")
+        except Exception as e:
+            log.warning(f"ContextCompressor init fallito | error={e}")
+    return _context_compressor
+
+
+# ─────────────────────────────────────────────────────────────────
+# Fase 0 — Contesto temporale
+# ─────────────────────────────────────────────────────────────────
+_GIORNI_IT = ["Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato","Domenica"]
+_MESI_IT   = ["","Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno",
+              "Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"]
+
+def _build_temporal_context() -> str:
+    """
+    Costruisce una stringa con data e ora corrente da iniettare come messaggio
+    system effimero prima di ogni turno. Permette a Scarlet di sapere sempre
+    in che momento temporale si trova.
+    """
+    now = datetime.now()
+    giorno = _GIORNI_IT[now.weekday()]
+    mese   = _MESI_IT[now.month]
+    return (
+        f"[Sistema — Contesto Temporale]\n"
+        f"Data e ora attuale: {giorno} {now.day} {mese} {now.year}, "
+        f"{now.strftime('%H:%M')} (UTC+1 Roma)"
+    )
 
 # Strutture minime per compatibilita OpenAI
 class ChatCompletionMessage(BaseModel):
@@ -72,6 +139,8 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     Endpoint proxy compatibile con lo standard OpenAI (usato da UI come Open WebUI).
     Implementa il pattern composito: PAD Evaluate -> PAD Update -> Letta Chat.
     """
+    global _last_pad_state  # Aggiornato dopo Step 2, usato nel retrieval del prossimo turno
+
     if not req.messages:
         raise HTTPException(status_code=400, detail="Nessun messaggio fornito")
 
@@ -149,11 +218,19 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     user_id = _extract_user_id(req)
     log.debug(f"user_id={user_id!r}")
 
-    # STEP 0.5: Memory Retrieval (pre-turno)
+    # Estrai ultimi 2 turni utente (escluso quello corrente) per multi-query retrieval
+    prior_user_turns = [m.content for m in req.messages if m.role == "user"][:-1][-2:]
+
+    # STEP 0.5: Memory Retrieval (pre-turno, con multi-query + PAD state del turno precedente)
     try:
         log.debug(f"Step 0.5 Memory Retrieval | user_id={user_id!r} query_preview={user_text[:60]!r}")
         t_mem = time.time()
-        mem_feed = _memory_retriever.feed_context(user_text, user_id=user_id)
+        mem_feed = _memory_retriever.feed_context(
+            user_text,
+            user_id=user_id,
+            conversation_context=prior_user_turns,
+            pad_state=_last_pad_state,
+        )
         elapsed_mem = (time.time() - t_mem) * 1000
         log.info(
             f"Step 0.5 Memory Retrieval OK | user_id={user_id!r} memories_found={mem_feed['memories_found']}"
@@ -184,6 +261,9 @@ async def openai_chat_completions(req: ChatCompletionRequest):
 
         # Snapshot PAD per la memoria (disponibile nel closure stream / non-stream)
         pad_state = (upd_resp.p, upd_resp.a, upd_resp.d)
+
+        # Aggiorna singleton PAD per il retrieval emotivo del prossimo turno
+        _last_pad_state = pad_state
 
         # STEP 2.5: Modulazione parametri LLM basata su PAD
         log.debug(f"Step 2.5 LLM Modulation | P={upd_resp.p:+.3f} A={upd_resp.a:+.3f} D={upd_resp.d:+.3f}")
@@ -219,18 +299,29 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     if req.stream:
         log.debug(f"Step 3 STREAM | avvio SSE proxy verso Letta | user_len={len(user_text)}")
         _stream_start = time.time()
+        _temporal_ctx = _build_temporal_context()  # Fase 0: contesto data/ora
 
         async def event_generator():
             full_response = []   # Accumula la risposta per il Memory Agent
             chunk_count = 0
             first_chunk_ms: float = 0.0
 
-            for chunk_obj in stream_letta_sse(user_text):
+            for chunk_obj in stream_letta_sse(user_text, system_prefix=_temporal_ctx):
                 if chunk_obj.get("type") == "done":
                     break
 
                 msg_type = chunk_obj.get("message_type", "")
                 log.debug(f"SSE event | type={msg_type} keys={list(chunk_obj.keys())}")
+
+                # Cattura usage_statistics per il compressor (Fase 4)
+                if msg_type == "usage_statistics":
+                    pt = chunk_obj.get("prompt_tokens", 0)
+                    if pt > 0:
+                        log.debug(f"usage_statistics | prompt_tokens={pt}")
+                        compressor = _get_or_create_compressor()
+                        if compressor:
+                            compressor.update_token_count(pt)
+                    continue
 
                 # Processiamo solo gli assistant_message (testo visibile + think)
                 if msg_type != "assistant_message":
@@ -300,10 +391,12 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     # ==========================================================
     # NON-STREAMING: Risposta completa in blocco unico
     # ==========================================================
+    # STEP 3 NON-STREAM
     log.debug(f"Step 3 NON-STREAM | inoltro a Letta user_len={len(user_text)}")
+    _temporal_ctx = _build_temporal_context()  # Fase 0
     t_chat = time.time()
     try:
-        chat_resp = await chat_letta(ChatRequest(message=user_text, stream=False))
+        chat_resp = await chat_letta(ChatRequest(message=user_text, stream=False, system_prefix=_temporal_ctx))
         elapsed_chat = (time.time() - t_chat) * 1000
         log.info(f"Step 3 Letta risposta | response_len={len(chat_resp.response)} elapsed_ms={elapsed_chat:.0f}")
         log.debug(f"Risposta Letta (preview): {chat_resp.response[:200]!r}")

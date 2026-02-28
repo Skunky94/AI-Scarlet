@@ -12,8 +12,10 @@ Flusso:
 
 import os
 import re
+import math
 import requests
 import time
+from datetime import date as _date
 from typing import List, Dict, Optional, Tuple
 from scarlet_observability import get_logger
 
@@ -66,6 +68,99 @@ class MemoryRetriever:
                 log.warning("AGENT_ID non trovato | controllare env var AGENT_ID o file .agent_id")
         log.debug(f"MemoryRetriever init | letta={self.letta_url} agent_id={(str(self.agent_id)[:20] if self.agent_id else None)} top_k={self.top_k}")
     
+    @staticmethod
+    def _relative_time(tags: List[str]) -> str:
+        """
+        Estrae la data dal tag 'ts:YYYY-MM-DD' e ritorna una stringa
+        relativa leggibile da Scarlet (es. 'oggi', '3 giorni fa', '2 settimane fa').
+        """
+        for t in tags:
+            if t.startswith("ts:"):
+                try:
+                    d = _date.fromisoformat(t[3:])
+                    delta = (_date.today() - d).days
+                    if delta == 0:   return "oggi"
+                    elif delta == 1: return "ieri"
+                    elif delta < 7:  return f"{delta} giorni fa"
+                    elif delta < 30:
+                        w = delta // 7
+                        return f"{w} {'settimana' if w == 1 else 'settimane'} fa"
+                    else:
+                        m = delta // 30
+                        return f"{m} {'mese' if m == 1 else 'mesi'} fa"
+                except ValueError:
+                    pass
+        return ""
+
+    @staticmethod
+    def _build_emotional_query(pad_state: Tuple[float, float, float]) -> str:
+        """
+        Costruisce una query semantica basata sullo stato PAD corrente.
+        Permette al retriever di prioritizzare memorie emotivamente affini.
+        """
+        P, A, D = pad_state
+        keywords = []
+        if P > 0.3:    keywords += ["piacere", "soddisfazione", "gioia"]
+        elif P < -0.3: keywords += ["tristezza", "difficoltà", "dolore"]
+        if A > 0.5:    keywords += ["eccitazione", "curiosità", "energia"]
+        elif A < 0.0:  keywords += ["calma", "riflessione", "tranquillità"]
+        if D > 0.3:    keywords += ["controllo", "autonomia", "decisione"]
+        elif D < 0.0:  keywords += ["incertezza", "dubbio", "vulnerabilità"]
+        return " ".join(keywords) if keywords else ""
+
+    @staticmethod
+    def _rerank(
+        memories: List[dict],
+        pad_state: Optional[Tuple[float, float, float]],
+        top_k: int,
+    ) -> List[dict]:
+        """
+        Re-ranking composito per selezionare le memorie top-k più rilevanti.
+        Score = importanza  x  recency_boost  x  (1 + pad_affinity).
+
+        - importanza: tag 'imp:N' (1-5), default 3
+        - recency_boost: e^(-giorni/30) — memorie recenti pesano di più
+        - pad_affinity: se il tag 'pad:A' della memoria è vicino all'arousal corrente
+        """
+        current_A = pad_state[1] if pad_state else 0.0
+        today = _date.today()
+
+        def _score(m: dict) -> float:
+            tags = m.get("tags") or []
+
+            # Importanza
+            imp = 3
+            for t in tags:
+                if t.startswith("imp:"):
+                    try: imp = int(t[4:])
+                    except ValueError: pass
+
+            # Recency: giorni dalla creazione
+            days = 9999
+            for t in tags:
+                if t.startswith("ts:"):
+                    try:
+                        d = _date.fromisoformat(t[3:])
+                        days = (today - d).days
+                    except ValueError: pass
+            recency = math.exp(-days / 30.0)  # da 1.0 (oggi) a ~0.0 (>90gg)
+
+            # PAD affinity: vicinanza tra arousal corrente e arousal al salvataggio
+            pad_affinity = 0.0
+            for t in tags:
+                if t.startswith("pad:"):
+                    parts = t.split(":")
+                    if len(parts) == 4:
+                        try:
+                            mem_A = float(parts[2])
+                            pad_affinity = 1.0 - abs(current_A - mem_A)
+                        except ValueError: pass
+
+            return imp * (1.0 + recency) * (1.0 + max(0.0, pad_affinity))
+
+        scored = sorted(memories, key=_score, reverse=True)
+        return scored[:top_k]
+
     def _build_retrieval_query(self, text: str) -> str:
         """
         Costruisce una query semantica ottimizzata rimuovendo stopwords
@@ -144,7 +239,7 @@ class MemoryRetriever:
     def format_active_memories(self, memories: List[dict]) -> str:
         """
         Formatta le memorie per il blocco active_memories.
-        Mostra categoria e ownership per contesto.
+        Mostra categoria, importanza, tempo relativo e contenuto.
         """
         if not memories:
             return "=== Memorie Attive ===\n(Nessuna memoria rilevante trovata per il contesto attuale)\n"
@@ -153,10 +248,13 @@ class MemoryRetriever:
         for i, mem in enumerate(memories, 1):
             content = mem.get("content", "")
             tags = mem.get("tags") or []
-            # Prendi il primo tag non-owner e non-pad come categoria
-            category_tags = [t for t in tags if not t.startswith(("owner:", "pad:"))]
+            # Categoria (primo tag non-owner, non-pad, non-ts, non-imp)
+            category_tags = [t for t in tags if not t.startswith(("owner:", "pad:", "ts:", "imp:"))]
             tag_str = f"[{category_tags[0]}]" if category_tags else "[general]"
-            lines.append(f"{i}. {tag_str} {content}")
+            # Tempo relativo
+            time_str = self._relative_time(tags)
+            time_suffix = f" ({time_str})" if time_str else ""
+            lines.append(f"{i}. {tag_str} {content}{time_suffix}")
 
         return "\n".join(lines) + "\n"
     
@@ -237,30 +335,71 @@ class MemoryRetriever:
             log.warning(f"ensure_block_exists error | label={block_label} error={e}")
             return False
     
-    def feed_context(self, user_message: str, user_id: str = "default") -> dict:
+    def feed_context(
+        self,
+        user_message: str,
+        user_id: str = "default",
+        conversation_context: Optional[List[str]] = None,
+        pad_state: Optional[Tuple[float, float, float]] = None,
+    ) -> dict:
         """
         Pipeline completa pre-turno: cerca memorie e popola i blocchi.
         Chiamato PRIMA di inviare il messaggio a Scarlet.
 
-        Args:
-            user_message: Testo dell'utente (non usato grezzo come query)
-            user_id:      Identità utente per filtering ownership
+        Fase 3 — Multi-query retrieval:
+          q1: keyword semantiche dal messaggio utente
+          q2: keyword semantiche dagli ultimi 2 turni (tema conversazione)
+          q3: query emotiva basata sullo stato PAD corrente
 
-        Returns: {"memories_found": int, "block_updated": bool}
+        Args:
+            user_message:         Testo dell'utente
+            user_id:              Identità utente per filtering ownership
+            conversation_context: Ultimi N turni utente per contesto tematico
+            pad_state:            Stato PAD Scarlet (da turno precedente) per query emotiva
+
+        Returns: {"memories_found": int, "block_updated": bool, "elapsed_ms": float}
         """
         t0 = time.time()
 
-        # 1. Costruisci query semantica ottimizzata (non raw text)
-        query = self._build_retrieval_query(user_message)
-        log.debug(f"feed_context start | user_id={user_id!r} query={query!r} top_k={self.top_k}")
+        # ——— Query 1: semantica sull'input corrente ———
+        q1 = self._build_retrieval_query(user_message)
 
-        # 2. Cerca memorie con over-fetch per compensare il filtraggio owner
-        raw_memories = self.search_memories(query, limit=self.top_k * 3)
+        # ——— Query 2: tema conversazione (ultimi 2 turni) ———
+        q2 = ""
+        if conversation_context:
+            merged_ctx = " ".join(conversation_context[-2:])
+            q2 = self._build_retrieval_query(merged_ctx)
 
-        # 3. Filtra per owner rilevante all'utente corrente
-        memories = self._filter_by_owner(raw_memories, user_id=user_id, top_k=self.top_k)
+        # ——— Query 3: affinità emotiva PAD ———
+        q3 = self._build_emotional_query(pad_state) if pad_state else ""
 
-        # 4. Formatta e aggiorna il blocco active_memories
+        log.debug(
+            f"feed_context start | user_id={user_id!r} q1={q1!r}"
+            f" q2={repr(q2) if q2 else '(skip)'} q3={repr(q3) if q3 else '(skip)'} top_k={self.top_k}"
+        )
+
+        # ——— Fetch parallelo (over-fetch per compensare merge + filter) ———
+        fetch_k = self.top_k * 4
+        results_1 = self.search_memories(q1, limit=fetch_k)
+        results_2 = self.search_memories(q2, limit=fetch_k) if q2 else []
+        results_3 = self.search_memories(q3, limit=fetch_k) if q3 else []
+
+        # ——— Merge + dedup per contenuto ———
+        seen: set = set()
+        merged: List[dict] = []
+        for m in results_1 + results_2 + results_3:
+            c = m.get("content", "")
+            if c not in seen:
+                seen.add(c)
+                merged.append(m)
+
+        # ——— Filtra per owner ———
+        filtered = self._filter_by_owner(merged, user_id, top_k=len(merged))
+
+        # ——— Re-ranking composito (recency + PAD + importanza) ———
+        memories = self._rerank(filtered, pad_state=pad_state, top_k=self.top_k)
+
+        # ——— Formatta e aggiorna il blocco active_memories ———
         formatted = self.format_active_memories(memories)
         log.debug(f"feed_context active_memories formatted | len={len(formatted)}")
         block_ok = self.update_memory_block("active_memories", formatted)
@@ -269,8 +408,9 @@ class MemoryRetriever:
         count = len(memories)
 
         log.info(
-            f"feed_context | user_id={user_id!r} raw={len(raw_memories)}"
-            f" filtered={count} block_updated={block_ok} elapsed_ms={elapsed:.0f}"
+            f"feed_context | user_id={user_id!r} q1_raw={len(results_1)} q2_raw={len(results_2)}"
+            f" q3_raw={len(results_3)} merged={len(merged)} filtered={len(filtered)}"
+            f" final={count} block_updated={block_ok} elapsed_ms={elapsed:.0f}"
         )
         if count > 0:
             log.debug(f"Memorie richiamate per contesto: {[m.get('content','')[:50] for m in memories]}")
