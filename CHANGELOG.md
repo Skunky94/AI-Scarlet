@@ -9,6 +9,34 @@ Formato entry: `type(scope): descrizione` — file modificati, data, categoria.
 <!-- ENTRIES -->
 ---
 
+## [2026-02-28] `feat(memory)` - migrazione archival memory → Cognee knowledge graph
+
+**Categoria:** Feature
+
+Sostituisce Letta archival flat + qwen2.5:7b Ollama con Cognee v0.5.3 (KuzuDB + LanceDB + SQLite, tutti embedded). `CogneeMemoryAgent.process_turn_async()` usa `cognee.add()+cognify()` per costruire un KG semantico-temporale per user. `CogneeRetriever.feed_context_async()` esegue 3 query parallele `GRAPH_COMPLETION_COT` (semantica, contesto conversazione, affinità PAD emotiva) e scrive su blocco Letta `active_memories` (meccanismo invariato). `consolidator.py` avvia un heartbeat asyncio ogni 10 min con `cognee.memify()` per pruning, strengthening e reweighting del grafo. LLM: MiniMax-M2.5 via `OPENAI_BASE_URL`. Embedding: mxbai-embed-large (Ollama locale). Thread `threading.Thread` sostituiti con `asyncio.create_task()` in openai.py per evitare conflitti event loop. Tutti i core memory blocks Letta e il PAD Engine rimangono invariati.
+
+### File
+- `requirements.txt` *(modified)* — `cognee>=0.5.3`
+- `Dockerfile` *(modified)* — layer cognee separato per cache
+- `docker-compose.yml` *(modified)* — volume cognee_data + 15 env vars Cognee
+- `scarlet_gateway/main.py` *(modified)* — init Cognee + avvio heartbeat nel lifespan
+- `scarlet_gateway/routes/openai.py` *(modified)* — swap import, async pattern
+- `scarlet_memory/cognee_agent.py` *(new)*
+- `scarlet_memory/cognee_retriever.py` *(new)*
+- `scarlet_memory/consolidator.py` *(new)*
+---
+
+## [2026-02-28] `chore(config)` - esporta stato agente aggiornato
+
+**Categoria:** Manutenzione
+
+Snapshot configurazione agente post-sessione. `agent_settings.json`: parametri PAD modulati (temp=0.85, max_tokens=5017, freq_penalty=0.30). `tools.json`: `tool_ids=[]` confermato — archival gestita interamente da Cognee subconscio.
+
+### File
+- `config/agent_settings.json` *(modified)*
+- `config/tools.json` *(modified)*
+---
+
 ## [2026-02-28] `infra(observability)` - sistema di log centralizzato con finestre temporali
 
 **Categoria:** Infrastruttura
