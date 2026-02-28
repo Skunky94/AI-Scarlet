@@ -74,14 +74,18 @@ if (-not (Test-Path ".git")) {
 Write-H "=== SCARLET - COMMIT HELPER ==="
 Write-Host ""
 
-$gitStatus = git status --short 2>&1
+$ErrorActionPreference = "Continue"  # git scrive warning su stderr: non devono interrompere
+$gitStatus = (git status --short 2>$null) | Where-Object { $_ -and "$_".Length -ge 2 }
+$ErrorActionPreference = "Stop"
 if (-not $gitStatus) {
     Write-Wn "Nessuna modifica da committare. Uscita."
     exit 0
 }
 
 Write-Host "Modifiche correnti:" -ForegroundColor White
-foreach ($line in $gitStatus) {
+foreach ($rawLine in $gitStatus) {
+    $line = "$rawLine"  # cast esplicito a stringa
+    if ($line.Length -lt 2) { continue }
     $sc = $line.Substring(0,2).Trim()
     $color = switch -Wildcard ($sc) {
         "A*" { "Green" }
@@ -139,7 +143,12 @@ Write-Host $commitMsg -ForegroundColor Cyan
 
 # --- Raccoglie file modificati per changelog ---
 $fileEntries = @()
-$changed = git diff --name-status HEAD 2>&1
+$ErrorActionPreference = "Continue"
+$changed   = (git diff --name-status HEAD   2>$null) | ForEach-Object { "$_" }
+$untracked = (git ls-files --others --exclude-standard 2>$null) | ForEach-Object { "$_" }
+$cached    = (git diff --name-status --cached 2>$null) | ForEach-Object { "$_" }
+$ErrorActionPreference = "Stop"
+
 foreach ($line in $changed) {
     if ($line -match "^([AMDRC])\s+(.+)$") {
         $lbl = switch ($Matches[1]) {
@@ -149,12 +158,10 @@ foreach ($line in $changed) {
         $fileEntries += "- ``$($Matches[2])`` $lbl"
     }
 }
-$untracked = git ls-files --others --exclude-standard 2>&1
 foreach ($f in $untracked) {
     if ($f) { $fileEntries += "- ``$f`` *(new)*" }
 }
 if ($fileEntries.Count -eq 0) {
-    $cached = git diff --name-status --cached 2>&1
     foreach ($line in $cached) {
         if ($line -match "^([AMDRC])\s+(.+)$") {
             $lbl = switch ($Matches[1]) {

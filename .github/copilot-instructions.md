@@ -152,3 +152,11 @@ Quando lavori su un task:
 4. **TESTA** — Esegui e verifica. Non saltare questo passo.
 5. **DOCUMENTA** — Se architettura o feature cambiano, aggiorna `docs/` e `README.md`.
 6. **PRESERVA** — Se modifichi l'agente, ri-esporta con `scripts/export_config.py`.
+
+
+---
+
+## Commit e Changelog
+- A fine di ogni sessione di lavoro, crea un commit con messaggio descrittivo.
+- Usa `scripts/commit.ps1` per generare messaggi in formato Conventional Commits e aggiornare automaticamente `CHANGELOG.md`.
+- Il changelog è la storia ufficiale del progetto. Mantienilo accurato e aggiornato.

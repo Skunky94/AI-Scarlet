@@ -9,6 +9,18 @@ Formato entry: `type(scope): descrizione` — file modificati, data, categoria.
 <!-- ENTRIES -->
 ---
 
+## [2026-02-28] `docs(roadmap)` - aggiunge ROADMAP.md con fasi, decisioni e problemi noti
+
+**Categoria:** Documentazione
+
+Roadmap strutturata in 5 fasi (Setup, Core Engine, Infrastruttura, Stabilizzazione, Visione). Include tabella decisioni architetturali, problemi noti, log sessioni. Fix script commit.ps1: gestione warning CRLF git con ErrorActionPreference.
+
+### File
+- `.github/copilot-instructions.md` *(modified)*
+- `scripts/commit.ps1` *(modified)*
+- `ROADMAP.md` *(new)*
+---
+
 ## [2026-02-28] `chore(workflow)` - aggiunge commit helper e changelog automatizzato
 
 **Categoria:** Manutenzione
