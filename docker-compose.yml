@@ -91,6 +91,8 @@ services:
       - gateway_hf_cache:/app/.cache/huggingface
       # Log osservabilita': persistiti sull'host, accessibili fuori dal container
       - ./logs:/app/logs
+      # Knowledge graph Cognee (SQLite + LanceDB + Kuzu): persistito su host
+      - cognee_data:/data/cognee
     ports:
       - "8000:8000"
     environment:
@@ -103,6 +105,26 @@ services:
       - MINIMAX_API_KEY=${MINIMAX_API_KEY}
       # AGENT_ID opzionale: se vuoto, il gateway legge da /app/.agent_id (montato sopra)
       - AGENT_ID=
+      # ─── Cognee Knowledge Engine ───────────────────────────────────────────────
+      # LLM: MiniMax M2.5 (OpenAI-compatible, flat-rate Code Plan)
+      - LLM_PROVIDER=openai
+      - LLM_MODEL=MiniMax-M2.5
+      - LLM_API_KEY=${MINIMAX_API_KEY}
+      - OPENAI_BASE_URL=https://api.minimax.io/v1
+      # Embedding: mxbai-embed-large via Ollama (GPU locale, già in VRAM)
+      - EMBEDDING_PROVIDER=openai
+      - EMBEDDING_MODEL=mxbai-embed-large
+      - EMBEDDING_API_KEY=ollama
+      - EMBEDDING_ENDPOINT=http://ollama:11434/v1
+      - EMBEDDING_DIMENSIONS=1024
+      # Storage: tutto embedded nel volume cognee_data (SQLite + LanceDB + Kuzu)
+      - GRAPH_DATABASE_PROVIDER=kuzu
+      - GRAPH_DATABASE_URL=/data/cognee/graph
+      - VECTOR_DB_PROVIDER=lancedb
+      - VECTOR_DB_URL=/data/cognee/vectors
+      - DB_PROVIDER=sqlite
+      - DB_PATH=/data/cognee
+      - COGNEE_TELEMETRY_ENABLED=false
     restart: unless-stopped
     # Healthcheck: il gateway è "ready" solo dopo che DistilBERT è caricato
     # start_period alto perché PyTorch + DistilBERT possono impiegare ~60s al primo avvio
@@ -163,4 +185,10 @@ volumes:
       o: bind
       device: H:/AI-Scarlet/.cache/huggingface
   open-webui-data:
+  cognee_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: H:/AI-Scarlet/.cognee
 

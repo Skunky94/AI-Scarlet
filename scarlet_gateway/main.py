@@ -9,10 +9,13 @@ Lifecycle:
 
 import os
 import time
+import asyncio
 import requests
+import cognee
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from scarlet_memory.consolidator import start_heartbeat
 
 # Sistema di osservabilita' centralizzato — inizializzato al primo import
 from scarlet_observability import get_logger
@@ -67,6 +70,21 @@ async def lifespan(app: FastAPI):
 
     # I router sono importati sotto — SubconsciousEvaluator (DistilBERT) si carica
     # in background tramite il thread warmup di pad.py (impegna GPU ~30s al primo avvio).
+    # === COGNEE INIT ===
+    # Cognee si auto-configura dagli env vars impostati in docker-compose.yml
+    # (LLM_PROVIDER, OPENAI_BASE_URL, LLM_MODEL, EMBEDDING_*, GRAPH_DATABASE_*, ecc.)
+    # Non è necessaria configurazione esplicita: solo verifichiamo che il modulo
+    # sia importato correttamente e avviamo il consolidatore.
+    log.info("Cognee init | configurazione da env vars (kuzu+lancedb+sqlite)")
+    log.debug(f"Cognee graph_db={os.getenv('GRAPH_DATABASE_PROVIDER','(def)')} "
+              f"vector_db={os.getenv('VECTOR_DB_PROVIDER','(def)')} "
+              f"llm={os.getenv('LLM_MODEL','(def)')}")
+
+    # Avvia il consolidatore heartbeat come task asyncio
+    # (gira per tutta la vita del processo, primo sleep = HEARTBEAT_SECONDS)
+    asyncio.create_task(start_heartbeat())
+    log.info("Consolidatore Cognee avviato (asyncio task)")
+
     log.info("======== Scarlet Gateway PRONTO ========")
 
     yield  # L'app gira qui

@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir \
 
 # --- Installazione dipendenze Python (senza torch, già installato) ---
 COPY requirements.txt .
-RUN grep -v "^torch" requirements.txt | pip install --no-cache-dir -r /dev/stdin
+# cognee installato prima separatamente (molte dipendenze, layer dedicato per cache)
+RUN pip install --no-cache-dir cognee>=0.5.3
+RUN grep -v "^torch" requirements.txt | grep -v "^cognee" | pip install --no-cache-dir -r /dev/stdin
 
 # --- Copia sorgente ---
 COPY scarlet_gateway/       ./scarlet_gateway/

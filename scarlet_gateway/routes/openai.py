@@ -14,8 +14,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from scarlet_gateway.routes.pad import evaluate_pad, update_pad, EvaluateRequest, UpdateRequest
 from scarlet_gateway.routes.letta import chat_letta, ChatRequest, stream_letta_sse
 from scarlet_pad.modulator import PADModulator
-from scarlet_memory.agent import MemoryAgent
-from scarlet_memory.retriever import MemoryRetriever
+from scarlet_memory.cognee_agent import CogneeMemoryAgent
+from scarlet_memory.cognee_retriever import CogneeRetriever
 from scarlet_memory.compressor import ContextCompressor
 from scarlet_observability import get_logger
 import re
@@ -25,8 +25,8 @@ log = get_logger("gateway.openai")
 
 # Singletons
 _pad_modulator    = PADModulator()
-_memory_agent     = MemoryAgent()
-_memory_retriever = MemoryRetriever()
+_memory_agent     = CogneeMemoryAgent()
+_memory_retriever = CogneeRetriever()
 
 # Stato modulo: PAD dell'ultimo turno (usato per emotional retrieval nel prossimo turno)
 _last_pad_state: Optional[Tuple[float, float, float]] = None
@@ -225,7 +225,7 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     try:
         log.debug(f"Step 0.5 Memory Retrieval | user_id={user_id!r} query_preview={user_text[:60]!r}")
         t_mem = time.time()
-        mem_feed = _memory_retriever.feed_context(
+        mem_feed = await _memory_retriever.feed_context_async(
             user_text,
             user_id=user_id,
             conversation_context=prior_user_turns,
@@ -377,12 +377,12 @@ async def openai_chat_completions(req: ChatCompletionRequest):
                     f"Step 4 BACKGROUND Memory Save | user_id={user_id!r} user_len={len(user_text)}"
                     f" response_len={len(visible_text)} think_len={len(think_text)}"
                 )
-                threading.Thread(
-                    target=_memory_agent.process_turn,
-                    args=(user_text, think_text, visible_text),
-                    kwargs={"user_id": user_id, "pad_state": pad_state},
-                    daemon=True
-                ).start()
+                asyncio.create_task(
+                    _memory_agent.process_turn_async(
+                        user_text, think_text, visible_text,
+                        user_id=user_id, pad_state=pad_state,
+                    )
+                )
             else:
                 log.debug("Step 4 BACKGROUND Memory Save | visible_text vuota, skip")
 
@@ -411,12 +411,12 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     _think_text = "\n".join(_think_match) if _think_match else ""
     _visible_text = _re.sub(r'<think>.*?</think>', '', chat_resp.response, flags=_re.DOTALL).strip()
     if _visible_text:
-        threading.Thread(
-            target=_memory_agent.process_turn,
-            args=(user_text, _think_text, _visible_text),
-            kwargs={"user_id": user_id, "pad_state": pad_state},
-            daemon=True
-        ).start()
+        asyncio.create_task(
+            _memory_agent.process_turn_async(
+                user_text, _think_text, _visible_text,
+                user_id=user_id, pad_state=pad_state,
+            )
+        )
 
     openai_response = {
         "id": response_id,
