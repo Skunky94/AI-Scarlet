@@ -48,11 +48,12 @@ async def chat_letta(req: ChatRequest):
     agent_id = _get_agent_id()
     url = f"{LETTA_URL}/v1/agents/{agent_id}/messages"
 
-    # Costruisci lista messaggi con eventuale prefisso di sistema (es. contesto temporale)
-    _msg_list = []
+    # Costruisci lista messaggi: il prefix viene embeddato nel testo utente perché
+    # Letta v0.16.4 ignora silenziosamente i messaggi con role=system nel payload.
+    _user_content = req.message
     if req.system_prefix:
-        _msg_list.append({"role": "system", "content": req.system_prefix})
-    _msg_list.append({"role": "user", "content": req.message})
+        _user_content = f"{req.system_prefix}\n\n{req.message}"
+    _msg_list = [{"role": "user", "content": _user_content}]
 
     payload = {
         "messages": _msg_list,
@@ -115,11 +116,12 @@ def stream_letta_sse(message: str, system_prefix: Optional[str] = None):
     agent_id = _get_agent_id()
     url = f"{LETTA_URL}/v1/agents/{agent_id}/messages/stream"
 
-    # Costruisci lista messaggi con eventuale prefisso di sistema
-    _sse_messages = []
+    # Costruisci lista messaggi: il prefix viene embeddato nel testo utente perché
+    # Letta v0.16.4 ignora silenziosamente i messaggi con role=system nel payload.
+    _user_content = message
     if system_prefix:
-        _sse_messages.append({"role": "system", "content": system_prefix})
-    _sse_messages.append({"role": "user", "content": message})
+        _user_content = f"{system_prefix}\n\n{message}"
+    _sse_messages = [{"role": "user", "content": _user_content}]
 
     payload = {
         "messages": _sse_messages,
