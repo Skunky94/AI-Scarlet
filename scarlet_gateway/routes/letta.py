@@ -1,3 +1,4 @@
+import os
 import json
 import requests
 from fastapi import APIRouter, HTTPException
@@ -6,8 +7,12 @@ from typing import Optional
 
 router = APIRouter()
 
-LETTA_URL = "http://localhost:8283"
-HEADERS = {"Authorization": "Bearer scarlet_dev", "Content-Type": "application/json"}
+# Leggono da env var (impostato in Docker) con fallback per uso locale
+LETTA_URL = os.getenv("LETTA_URL", "http://localhost:8283")
+HEADERS = {
+    "Authorization": f"Bearer {os.getenv('LETTA_API_KEY', 'scarlet_dev')}",
+    "Content-Type": "application/json"
+}
 
 class ChatRequest(BaseModel):
     message: str
@@ -18,11 +23,15 @@ class ChatResponse(BaseModel):
     raw_messages: list = []
 
 def _get_agent_id() -> str:
+    """Legge AGENT_ID da env var (Docker) o da file .agent_id (host)."""
+    agent_id = os.getenv("AGENT_ID", "").strip()
+    if agent_id:
+        return agent_id
     try:
         with open(".agent_id", "r") as f:
             return f.read().strip()
     except Exception:
-        raise HTTPException(status_code=500, detail="Impossibile trovare file .agent_id")
+        raise HTTPException(status_code=500, detail="AGENT_ID non trovato (env var o file .agent_id)")
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_letta(req: ChatRequest):

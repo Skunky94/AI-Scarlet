@@ -13,6 +13,7 @@ Processo:
 Modello: qwen2.5:7b su Ollama Docker (~4GB VRAM, ~2-4s)
 """
 
+import os
 import json
 import time
 import threading
@@ -62,10 +63,10 @@ class MemoryAgent:
     
     def __init__(
         self,
-        ollama_url: str = "http://localhost:11434",
+        ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434"),
         ollama_model: str = "qwen2.5:7b",
-        letta_url: str = "http://localhost:8283",
-        letta_token: str = "scarlet_dev",
+        letta_url: str = os.getenv("LETTA_URL", "http://localhost:8283"),
+        letta_token: str = os.getenv("LETTA_API_KEY", "scarlet_dev"),
         agent_id_file: str = ".agent_id",
     ):
         self.ollama_url = ollama_url.rstrip('/')
@@ -76,13 +77,15 @@ class MemoryAgent:
             "Content-Type": "application/json"
         }
         
-        # Leggi agent_id
-        try:
-            with open(agent_id_file) as f:
-                self.agent_id = f.read().strip()
-        except Exception:
-            self.agent_id = None
-            print("[MemoryAgent] WARN: .agent_id non trovato")
+        # Leggi agent_id: env var (Docker) → file (host)
+        self.agent_id = os.getenv("AGENT_ID", "").strip() or None
+        if not self.agent_id:
+            try:
+                with open(agent_id_file) as f:
+                    self.agent_id = f.read().strip()
+            except Exception:
+                self.agent_id = None
+                print("[MemoryAgent] WARN: AGENT_ID non trovato (env var o file)")
         
         # Warmup: pre-carica il modello in VRAM in background
         threading.Thread(target=self.warmup, daemon=True).start()

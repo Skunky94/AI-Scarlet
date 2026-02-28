@@ -1,0 +1,20 @@
+# === Scarlet Gateway — Dipendenze Python ===
+# NOTA: In Docker, torch viene installato con index CUDA (vedi Dockerfile).
+#       Su host: pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# --- Web Framework ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# --- HTTP Client ---
+requests>=2.32.0
+
+# --- Data Validation ---
+pydantic>=2.7.0
+
+# --- ML / AI (PyTorch + Transformers per DistilBERT) ---
+torch>=2.4.0
+transformers>=4.44.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0

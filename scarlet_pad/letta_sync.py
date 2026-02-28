@@ -4,13 +4,16 @@ Legge e Scrive il blocco 'emotional_state' via API Letta.
 Il blocco Letta e' la Single Source of Truth.
 """
 
+import os
 import re
 import requests
 from typing import Optional, Tuple
 from scarlet_pad.core import PADState, PADCore
 
 class LettaPADSync:
-    def __init__(self, base_url: str = "http://localhost:8283", token: str = "scarlet_dev"):
+    def __init__(self,
+                 base_url: str = os.getenv("LETTA_URL", "http://localhost:8283"),
+                 token: str = os.getenv("LETTA_API_KEY", "scarlet_dev")):
         self.base_url = base_url.rstrip('/')
         self.headers = {
             "Authorization": f"Bearer {token}",
@@ -18,7 +21,10 @@ class LettaPADSync:
         }
     
     def get_agent_id(self) -> Optional[str]:
-        """Tenta di recuperare l'ID agente leggendo .agent_id locale."""
+        """Legge AGENT_ID da env var (Docker) o da file .agent_id (host)."""
+        agent_id = os.getenv("AGENT_ID", "").strip()
+        if agent_id:
+            return agent_id
         try:
             with open(".agent_id", "r", encoding="utf-8") as f:
                 return f.read().strip()

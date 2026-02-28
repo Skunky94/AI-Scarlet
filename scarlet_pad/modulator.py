@@ -43,6 +43,7 @@ Dominance → Frequency Penalty:
   - Dominance BASSA (-1.0): Scarlet è sottomessa → penalty ALTA (0.8) = cerca parole diverse, meno assertiva
 """
 
+import os
 import requests
 from typing import Optional
 
@@ -50,8 +51,9 @@ from typing import Optional
 class PADModulator:
     """Modula i parametri LLM di Scarlet basandosi sullo stato PAD corrente."""
     
-    def __init__(self, letta_url: str = "http://localhost:8283",
-                 letta_token: str = "scarlet_dev"):
+    def __init__(self,
+                 letta_url: str = os.getenv("LETTA_URL", "http://localhost:8283"),
+                 letta_token: str = os.getenv("LETTA_API_KEY", "scarlet_dev")):
         self.letta_url = letta_url.rstrip('/')
         self.headers = {
             "Authorization": f"Bearer {letta_token}",

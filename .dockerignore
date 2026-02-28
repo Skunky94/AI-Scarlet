@@ -1,0 +1,42 @@
+# === Scarlet Gateway — .dockerignore ===
+# Esclude file non necessari dall'immagine Docker
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Ambienti virtuali
+.venv/
+venv/
+env/
+
+# Dati locali (non copiati in immagine — montati come volumi)
+.ollama/
+.letta/
+.cache/
+.agent_id
+
+# Script di setup/manutenzione (solo per host)
+scripts/
+
+# File di sviluppo
+*.md
+docs/
+config/
+.env
+.env.*
+
+# Git
+.git/
+.gitignore
+
+# Docker stessa
+Dockerfile
+docker-compose*.yml
+docker-compose*.yaml
+
+# Test
+*.test.py

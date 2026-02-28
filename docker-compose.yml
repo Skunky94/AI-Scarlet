@@ -1,11 +1,20 @@
-# === Progetto Scarlet — Docker Compose ===
-# Letta Server + Ollama con GPU CUDA
+# === Progetto Scarlet — Docker Compose (Unified) ===
 #
-# Uso: docker compose up -d
-# Richiede: .env nella stessa directory
+# Avvio completo: docker compose up -d
+# Shutdown:       docker compose down
+#
+# Ordine di avvio garantito da depends_on + healthcheck:
+#   ollama → letta → scarlet-gateway → open-webui
+#
+# Prerequisiti:
+#   - .env nella stessa directory (MINIMAX_API_KEY, LETTA_SERVER_PASSWORD)
+#   - .agent_id nella stessa directory (creato da scripts/create_agent.py)
 
 services:
-  # --- Ollama: LLM Locale con GPU ---
+
+  # ─────────────────────────────────────────────
+  # 1. Ollama — LLM locale con GPU
+  # ─────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
     container_name: scarlet-ollama
@@ -21,24 +30,30 @@ services:
     ports:
       - "11434:11434"
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "/usr/bin/ollama", "list" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
-  # --- Letta Server: Agente Scarlet ---
+  # ─────────────────────────────────────────────
+  # 2. Letta — Agente Scarlet (attende Ollama)
+  # ─────────────────────────────────────────────
   letta:
     image: letta/letta:latest
     container_name: scarlet-letta
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     volumes:
       - letta_pgdata:/var/lib/postgresql/data
     ports:
       - "8283:8283"
     environment:
-      # MiniMax come provider OpenAI (stile Cursor: override base URL)
       - OPENAI_API_KEY=${MINIMAX_API_KEY}
       - OPENAI_BASE_URL=https://api.minimax.io/v1
-      # Ollama locale (raggiungibile via nome servizio)
       - OLLAMA_BASE_URL=http://ollama:11434/v1
-      # Sicurezza
       - SECURE=true
       - LETTA_SERVER_PASSWORD=${LETTA_SERVER_PASSWORD}
     restart: unless-stopped
@@ -49,6 +64,81 @@ services:
       retries: 5
       start_period: 30s
 
+  # ─────────────────────────────────────────────
+  # 3. Scarlet Gateway — FastAPI + PAD + Memoria
+  #    (attende Letta healthy)
+  # ─────────────────────────────────────────────
+  scarlet-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scarlet-gateway:latest
+    container_name: scarlet-gateway
+    depends_on:
+      letta:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    volumes:
+      # .agent_id montato in sola lettura (creato da scripts/create_agent.py sull'host)
+      - ./.agent_id:/app/.agent_id:ro
+      # Cache modelli HuggingFace (DistilBERT): evita re-download a ogni riavvio
+      - gateway_hf_cache:/app/.cache/huggingface
+    ports:
+      - "8000:8000"
+    environment:
+      # URL servizi — usa nomi container (rete Docker interna)
+      - LETTA_URL=http://letta:8283
+      - OLLAMA_URL=http://ollama:11434
+      # Chiave API Letta (stessa password configurata nel servizio letta)
+      - LETTA_API_KEY=${LETTA_SERVER_PASSWORD}
+      # AGENT_ID opzionale: se vuoto, il gateway legge da /app/.agent_id (montato sopra)
+      - AGENT_ID=
+    restart: unless-stopped
+    # Healthcheck: il gateway è "ready" solo dopo che DistilBERT è caricato
+    # start_period alto perché PyTorch + DistilBERT possono impiegare ~60s al primo avvio
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  # ─────────────────────────────────────────────
+  # 4. Open WebUI — UI chat (attende Gateway)
+  # ─────────────────────────────────────────────
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: scarlet-ui
+    depends_on:
+      scarlet-gateway:
+        condition: service_healthy
+    environment:
+      - OPENAI_API_KEY=scarlet_dev
+      # Gateway raggiungibile via rete interna Docker (non più host.docker.internal)
+      - OPENAI_API_BASE_URL=http://scarlet-gateway:8000/v1
+      - WEBUI_AUTH=False
+      - ENABLE_OLLAMA_API=False
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+# ─────────────────────────────────────────────
+# Volumi persistenti
+# ─────────────────────────────────────────────
 volumes:
   ollama_data:
     driver: local
@@ -62,3 +152,11 @@ volumes:
       type: none
       o: bind
       device: H:/AI-Scarlet/.letta/pgdata
+  gateway_hf_cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: H:/AI-Scarlet/.cache/huggingface
+  open-webui-data:
+

@@ -10,6 +10,7 @@ Flusso:
 3. Aggiorna i memory blocks con le memorie top-5 rilevanti
 """
 
+import os
 import requests
 import time
 from typing import List, Dict, Optional
@@ -20,8 +21,8 @@ class MemoryRetriever:
     
     def __init__(
         self,
-        letta_url: str = "http://localhost:8283",
-        letta_token: str = "scarlet_dev",
+        letta_url: str = os.getenv("LETTA_URL", "http://localhost:8283"),
+        letta_token: str = os.getenv("LETTA_API_KEY", "scarlet_dev"),
         agent_id_file: str = ".agent_id",
         top_k: int = 5,
     ):
@@ -32,12 +33,15 @@ class MemoryRetriever:
         }
         self.top_k = top_k
         
-        try:
-            with open(agent_id_file) as f:
-                self.agent_id = f.read().strip()
-        except Exception:
-            self.agent_id = None
-            print("[MemoryRetriever] WARN: .agent_id non trovato")
+        # Leggi agent_id: env var (Docker) → file (host)
+        self.agent_id = os.getenv("AGENT_ID", "").strip() or None
+        if not self.agent_id:
+            try:
+                with open(agent_id_file) as f:
+                    self.agent_id = f.read().strip()
+            except Exception:
+                self.agent_id = None
+                print("[MemoryRetriever] WARN: AGENT_ID non trovato (env var o file)")
     
     def search_memories(self, query: str, limit: int = None) -> List[dict]:
         """

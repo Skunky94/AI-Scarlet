@@ -1,3 +1,8 @@
+# === DEPRECATO ===
+# Questo file è stato assorbito in docker-compose.yml (servizio open-webui).
+# Non usare più questo file separatamente.
+# Lasciato come riferimento storico.
+#
 version: '3.8'
 
 services:
