@@ -112,12 +112,15 @@ class TimeWindowedFileHandler(logging.Handler):
 
     def __init__(self, log_dir: str, window_minutes: int):
         super().__init__()
-        self.log_dir = log_dir
+        # Converte sempre in percorso assoluto al momento dell'init.
+        # Garantisce che open(filepath, "a") funzioni indipendentemente
+        # da eventuali CWD changes in uvicorn/asyncio workers.
+        self.log_dir = os.path.abspath(log_dir)
         self.window_minutes = window_minutes
         self._lock = Lock()
         self._current_window: Optional[datetime] = None
         self._stream = None
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(self.log_dir, exist_ok=True)
 
     def _get_window_start(self) -> datetime:
         """Restituisce l'inizio della finestra temporale corrente (floor)."""
